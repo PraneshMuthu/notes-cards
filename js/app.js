@@ -57,11 +57,19 @@ function showNext() {
   el.className = 'card';
   if (!pick) {
     $('chip').textContent = 'Notes Cards';
-    el.innerHTML = '<div class="front"><p>No cards match this filter.</p></div>';
+    const f = document.createElement('div');
+    f.className = 'front';
+    f.textContent = 'No cards match this filter.';
+    el.append(f);
   } else {
     $('chip').textContent = pick.card.topic;
-    el.innerHTML = '<div class="front"></div><div class="hint">tap to reveal</div>';
-    el.firstChild.innerHTML = renderMarkdown(pick.card.front);
+    const f = document.createElement('div');
+    f.className = 'front';
+    f.innerHTML = renderMarkdown(pick.card.front);
+    const hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'tap to reveal';
+    el.append(f, hint);
   }
   $('stage').replaceChildren(el);
   updateCounts();
@@ -158,7 +166,9 @@ function wireMenu() {
   $('exportBtn').onclick = () => {
     const url = URL.createObjectURL(new Blob([store.exportJson()], { type: 'application/json' }));
     const a = document.createElement('a');
-    a.href = url; a.download = `notes-cards-progress-${new Date().toISOString().slice(0, 10)}.json`;
+    const n = new Date();
+    const p2 = (x) => String(x).padStart(2, '0');
+    a.href = url; a.download = `notes-cards-progress-${n.getFullYear()}-${p2(n.getMonth() + 1)}-${p2(n.getDate())}.json`;
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     msg('Exported.');
@@ -200,7 +210,7 @@ document.addEventListener('keydown', (e) => {
   if (!$('menu').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.target.closest?.('button, input, select, label, summary, a')) return;
   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
-  else if ('1234'.includes(e.key) && e.key) grade(Number(e.key));
+  else if ('1234'.includes(e.key)) grade(Number(e.key));
 });
 $('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a')) reveal(); });
 for (const b of document.querySelectorAll('#grades button')) b.onclick = () => grade(Number(b.dataset.g));
@@ -210,13 +220,13 @@ async function main() {
   if (store.recovered) banner('recovered', 'Your saved progress was damaged; a backup copy was kept in this browser.', true);
   loadUi();
   wireMenu();
+  if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
+    try { navigator.serviceWorker.register('./sw.js').catch(() => {}); } catch { /* optional */ }
+  }
   try { await loadDeck(); } catch (err) { console.warn('Could not load cards/index.json', err); }
   if (!cards.length) { banner('noDeck', 'Could not load any cards. Check your connection and reload.'); return; }
   states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
   buildMenu();
   showNext();
-  if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
-    try { navigator.serviceWorker.register('./sw.js').catch(() => {}); } catch { /* optional */ }
-  }
 }
 main();

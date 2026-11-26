@@ -12,12 +12,12 @@ self.addEventListener('install', (e) => {
 
 async function precache() {
   const c = await caches.open(CACHE);
-  await c.addAll(SHELL);
+  await Promise.all(SHELL.map((u) => c.add(new Request(u, { cache: 'reload' })).catch(() => {})));
   try { // card files are listed in cards/index.json; cache them so the first offline visit works
-    const res = await fetch('./cards/index.json', { cache: 'no-store' });
+    const res = await fetch(new Request('./cards/index.json', { cache: 'reload' }));
     await c.put('./cards/index.json', res.clone());
     const files = await res.json();
-    await Promise.all(files.map((f) => c.add('./cards/' + f).catch(() => {})));
+    await Promise.all(files.map((f) => c.add(new Request('./cards/' + f, { cache: 'reload' })).catch(() => {})));
   } catch { /* offline install: cards will be cached on first online use */ }
 }
 
@@ -32,28 +32,21 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
-  const isCards = url.pathname.includes('/cards/');
-  e.respondWith(isCards ? networkFirst(req) : cacheFirst(req));
+  e.respondWith(networkFirst(req));
 });
 
+// Every same-origin GET is network-first (revalidated via ETag), so a deploy is picked up
+// on the next online load without any VERSION bump. The cache is only the offline fallback.
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
   try {
-    const res = await fetch(req);
+    const res = await fetch(req, { cache: 'no-cache' });
     if (res.ok) cache.put(req, res.clone());
     return res;
   } catch (err) {
-    const hit = await cache.match(req);
+    const hit = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
     if (hit) return hit;
+    if (req.mode === 'navigate') { const idx = await cache.match('./index.html'); if (idx) return idx; }
     throw err;
   }
-}
-
-async function cacheFirst(req) {
-  const cache = await caches.open(CACHE);
-  const hit = await cache.match(req, { ignoreSearch: true });
-  if (hit) return hit;
-  const res = await fetch(req);
-  if (res.ok) cache.put(req, res.clone());
-  return res;
 }

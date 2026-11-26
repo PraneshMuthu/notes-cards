@@ -23,7 +23,7 @@ export function checkDeck(dir) {
   for (const f of list) {
     if (!existsSync(join(dir, f))) { errors.push(`${f}: listed in index.json but missing`); continue; }
     const parsed = parseCardFile(readFileSync(join(dir, f), 'utf8'), f);
-    warnings.push(...parsed.warnings.map((w) => `${w}`));
+    warnings.push(...parsed.warnings);
     if (!parsed.cards.length) errors.push(`${f}: has 0 cards`);
     for (const c of parsed.cards) {
       cards++;
