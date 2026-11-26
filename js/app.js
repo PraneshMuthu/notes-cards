@@ -3,7 +3,7 @@ import { parseCardFile } from './parse.js';
 import { renderMarkdown } from './markdown.js';
 import { createStore } from './store.js';
 import { makeFsrs, replay } from './scheduler.js';
-import { pickNext, counts } from './picker.js';
+import { pickNext, counts, progress } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -58,7 +58,7 @@ function filter() {
 
 function updateCounts() {
   const c = counts(cards, states, store.reviews(), new Date(), store.settings().newPerDay);
-  $('counts').textContent = `⏳ ${c.due} · ✗ ${c.forgot} · ✦ ${c.newLeft}`;
+  $('counts').textContent = `Due ${c.due} · Forgot ${c.forgot} · New ${c.newLeft}`;
   banner('saveWarn', store.ok ? '' : "Progress isn't being saved on this browser — export a backup.");
   backupNag();
 }
@@ -82,9 +82,13 @@ function showNext() {
     el.append(f);
   } else {
     $('chip').textContent = pick.card.topic;
+    const topic = document.createElement('div');
+    topic.className = 'topic';
+    topic.textContent = pick.card.topic;
     const f = document.createElement('div');
     f.className = 'front';
     f.innerHTML = renderMarkdown(pick.card.front);
+    el.append(topic);
     const hint = document.createElement('div');
     hint.className = 'hint';
     hint.textContent = 'tap to reveal';
@@ -195,7 +199,14 @@ function buildMenu() {
 }
 
 function wireMenu() {
-  const open = (on) => { $('menu').hidden = !on; };
+  const open = (on) => {
+    if (on) {
+      const p = progress(cards, states);
+      $('seen').textContent = `Seen ${p.seen} of ${p.total} cards`;
+      $('seenGroups').textContent = p.groups.map((g) => `${g.group} ${g.seen}/${g.total}`).join(' · ');
+    }
+    $('menu').hidden = !on;
+  };
   $('menuBtn').onclick = () => open(true);
   $('menuClose').onclick = () => open(false);
   $('menu').onclick = (e) => { if (e.target === $('menu')) open(false); };

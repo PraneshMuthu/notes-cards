@@ -30,6 +30,19 @@ export function counts(cards, states, reviews, now, newPerDay) {
   return { due, forgot, newLeft: Math.min(newLeftToday(reviews, cards, now, newPerDay), fresh) };
 }
 
+/** Cards seen (graded at least once) out of the deck, overall and per group (sorted by group). */
+export function progress(cards, states) {
+  const by = new Map();
+  let seen = 0;
+  for (const c of cards) {
+    const g = by.get(c.group) ?? { group: c.group, seen: 0, total: 0 };
+    g.total++;
+    if (states.has(c.id)) { g.seen++; seen++; }
+    by.set(c.group, g);
+  }
+  return { seen, total: cards.length, groups: [...by.values()].sort((a, b) => a.group.localeCompare(b.group)) };
+}
+
 function pickMixed(tier, avoidTopic, lastGroup) {
   const groups = [...new Set(tier.map((x) => x.card.group))].sort();
   let start = lastGroup === undefined ? 0 : groups.findIndex((g) => g > lastGroup);

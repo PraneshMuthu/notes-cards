@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFsrs, replay } from '../js/scheduler.js';
-import { pickNext, newLeftToday, counts } from '../js/picker.js';
+import { pickNext, newLeftToday, counts, progress } from '../js/picker.js';
 
 const f = makeFsrs({ fuzz: false });
 const now = new Date(2026, 2, 10, 12, 0, 0);
@@ -259,4 +259,13 @@ test('skipped card whose step is due is not shown again for 10 minutes', () => {
   assert.equal(pick({ cards, states: st, reviews: entries, history: old }).card.id, 'r');
   // Alone, it still comes back rather than an empty screen.
   assert.equal(pick({ cards: [cards[0]], states: st, reviews: entries, history }).card.id, 'r');
+});
+
+test('progress counts cards seen at least once, overall and per group', () => {
+  const cards = [card('a', 'HLD', 'A'), card('b', 'HLD', 'B'), card('c', 'DSA', 'C')];
+  const entries = [{ c: 'a', g: 3, t: ago(MIN), d: '' }, { c: 'a', g: 1, t: ago(1), d: '' },
+    { c: 'gone', g: 3, t: ago(MIN), d: '' }];
+  const p = progress(cards, states(cards, entries));
+  assert.deepEqual(p, { seen: 1, total: 3, groups: [
+    { group: 'DSA', seen: 0, total: 1 }, { group: 'HLD', seen: 1, total: 2 }] });
 });
