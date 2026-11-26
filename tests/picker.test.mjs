@@ -186,7 +186,8 @@ test('small deck rotates: no back-to-back repeats, all cards seen', () => {
     history.push({ id: prev, at: t.getTime() });
     reviews.push({ c: prev, g: 3, t: t.getTime(), d: '' });
   }
-  for (const id of ['a', 'b', 'c']) assert.ok(seen[id] >= 8, `${id} seen ${seen[id]}`);
+  // >= 7, not 8: a learning card now waits for its step instead of being shown early as 'weak'.
+  for (const id of ['a', 'b', 'c']) assert.ok(seen[id] >= 7, `${id} seen ${seen[id]}`);
 });
 
 test('endless: new cards only on every 5th pick, never bypass cap', () => {
@@ -227,4 +228,20 @@ test('new cards rotate across topics within a group', () => {
   assert.deepEqual(picked.slice(0, 3).map((c) => c.topic), ['T1', 'T2', 'T3']);
   assert.deepEqual(picked.slice(3).map((c) => c.topic), ['T1', 'T2', 'T3']);
   assert.equal(new Set(picked.map((c) => c.id)).size, 6);
+});
+
+test('endless weak list skips learning/relearning cards whose step is not due yet', () => {
+  const cards = [card('l', 'G', 'A'), card('n', 'G', 'B')];
+  const entries = [{ c: 'l', g: 3, t: ago(MIN), d: '' }]; // learning, next step in ~10 min
+  const st = states(cards, entries);
+  assert.ok(st.get('l').due.getTime() > now.getTime());
+  const r = pick({ cards, states: st, reviews: entries, settings: { newPerDay: 1 } });
+  assert.deepEqual([r.card.id, r.queue], ['n', 'endless-new']);
+  // A settled (graduated, not due) card is preferred over the early step even if it is stronger.
+  const g = [...graduated('g', 2)];
+  const both = [cards[0], card('g', 'G', 'C')];
+  const st2 = states(both, [...entries, ...g]);
+  assert.equal(pick({ cards: both, states: st2, reviews: [...entries, ...g], settings: { newPerDay: 1 } }).card.id, 'g');
+  // Nothing else at all: the early step is offered rather than an empty screen.
+  assert.equal(pick({ cards: [cards[0]], states: st, reviews: entries, settings: { newPerDay: 1 } }).card.id, 'l');
 });

@@ -92,12 +92,23 @@ function buildTiers(pool, ctx, skip) {
   if (filter.queue === 'new') return [fresh];
 
   const t3 = newCount > 0 ? fresh : [];
-  const weak = studied.filter((c) => !skip(c))
+  // Learning/relearning cards wait for their step; showing them early would grade them early.
+  const stepPending = (c) => {
+    const k = q.get(c.id);
+    return (k === 'learning' || k === 'relearning') && states.get(c.id).due > now;
+  };
+  const settled = studied.filter((c) => !stepPending(c));
+  const weak = settled.filter((c) => !skip(c))
     .map((c) => ({ card: c, queue: 'weak', r: retrievability(fsrs, states.get(c.id), now) }))
     .sort((a, b) => a.r - b.r || byAge(a.card, b.card));
   const endlessNew = fresh.map((x) => ({ ...x, queue: 'endless-new' }));
+  // Fallback when no settled card is eligible (and, with nothing settled, no new card exists):
+  // early steps, soonest first, rather than a repeat or an empty screen.
+  const early = studied.filter((c) => stepPending(c) && !skip(c))
+    .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('weak'));
   const t4 = session.endlessCount % 5 === 4 && endlessNew.length ? endlessNew
-    : studied.length ? weak : endlessNew;
+    : settled.length ? (weak.length ? weak : early)
+    : pool.some((c) => !states.has(c.id)) ? endlessNew : early;
   return [t1, t2, t3, t4];
 }
 
