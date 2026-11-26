@@ -12,6 +12,7 @@
   "hld-11-payment-upi.md",
   "hld-12-flash-sale.md",
   "hld-building-blocks.md",
+  "lld-00-principles.md",
   "lld-01-parking-lot.md",
   "lld-02-vending-machine.md",
   "lld-03-splitwise.md",
@@ -31,5 +32,6 @@
   "dsa-linked-list-stack.md",
   "dsa-sliding-window.md",
   "dsa-trees.md",
-  "dsa-two-pointers.md"
+  "dsa-two-pointers.md",
+  "dsa-which-pattern.md"
 ]

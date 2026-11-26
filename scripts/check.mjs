@@ -29,7 +29,9 @@ export function checkDeck(dir) {
       cards++;
       if (owner.has(c.id)) errors.push(`${f}: duplicate id "${c.id}" (also in ${owner.get(c.id)})`);
       else owner.set(c.id, f);
-      if (c.back.length > 700) warnings.push(`${f}: "${c.front}" back is ${c.back.length} chars (over 700)`);
+      // Collapsed <details> (DSA code) is reference, not recalled, so it doesn't count.
+      const visible = c.back.replace(/<details>[\s\S]*?<\/details>/g, '').length;
+      if (visible > 700) warnings.push(`${f}: "${c.front}" back is ${visible} visible chars (over 700)`);
     }
   }
   return { cards, errors, warnings };

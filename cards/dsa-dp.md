@@ -3,10 +3,12 @@ topic: DSA · Dynamic Programming
 group: DSA
 ---
 
-## Climbing Stairs: n steps, you climb 1 or 2 at a time. How many distinct ways to reach the top? E.g. n=3 gives 3 (1+1+1, 1+2, 2+1). {#dsadp-climbing-stairs}
-**Pattern:** 1D DP (Fibonacci).
-**Insight:** ways(n) = ways(n-1) + ways(n-2), since the last move was a 1 or a 2. Keep only the last two values.
+## Staircase of n steps; each move climbs 1 or 2 steps. How many distinct move sequences reach the top? E.g. n=3 gives 3 (1+1+1, 1+2, 2+1). (Climbing Stairs) {#dsadp-climbing-stairs}
+**Pattern:** 1D DP (dynamic programming: solve each smaller size once and reuse it); here it is Fibonacci.
+**Insight:** ways(n) = ways(n−1) + ways(n−2), because the last move was either a 1 or a 2. Only the last two values are ever needed.
 **Complexity:** O(n) time, O(1) space.
+**Edge:** n = 0 → 1 (the empty sequence); n = 1 → 1.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -21,10 +23,12 @@ def climb_stairs(n):
 
 </details>
 
-## House Robber: houses in a row hold money; you cannot rob two adjacent houses. Max total? E.g. [2,7,9,3,1] gives 12 (2+9+1). {#dsadp-house-robber}
-**Pattern:** 1D DP with take-or-skip.
-**Insight:** best(i) = max(best(i-1), best(i-2) + money[i]): skip this house, or rob it and use the best from two back. Two variables are enough.
+## Houses in a row each hold some cash; you may not take from two neighbouring houses. Maximum total? E.g. [2,7,9,3,1] gives 12 (2 + 9 + 1). (House Robber) {#dsadp-house-robber}
+**Pattern:** 1D DP with a take-or-skip choice.
+**Insight:** best(i) = max(best(i−1), best(i−2) + cash[i]): skip this house, or take it and add the best from two back. Two variables are enough.
 **Complexity:** O(n) time, O(1) space.
+**Edge:** empty → 0; one house → its cash. Greedy "take every other house" fails on [2,1,1,2] (best is 4).
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -39,10 +43,12 @@ def rob(nums):
 
 </details>
 
-## Coin Change: fewest coins (unlimited supply of each type) that sum to an amount, or -1. E.g. coins [1,2,5], amount 11 gives 3 (5+5+1). {#dsadp-coin-change}
-**Pattern:** unbounded knapsack, bottom-up DP over amounts.
-**Insight:** dp[a] = 1 + min(dp[a - c]) over coins c <= a, with dp[0] = 0 and unreachable as infinity. Greedy fails (e.g. coins [1,3,4], amount 6).
-**Complexity:** O(amount x n) time, O(amount) space.
+## Coin denominations (unlimited of each) and an amount: the fewest coins that make it exactly, or -1. E.g. coins [1,2,5], amount 11 gives 3 (5+5+1). (Coin Change) {#dsadp-coin-change}
+**Pattern:** unbounded knapsack: bottom-up DP over every amount 0..target.
+**Insight:** dp[a] = 1 + min(dp[a − c]) over coins c ≤ a, with dp[0] = 0 and "unreachable" as infinity. Greedy (largest coin first) fails: coins [1,3,4], amount 6 → greedy 4+1+1 = 3 coins, best 3+3 = 2.
+**Complexity:** O(amount × n) time (n coin types), O(amount) space.
+**Edge:** amount 0 → 0; an amount no combination reaches (coins [2], amount 3) → -1.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -59,15 +65,24 @@ def coin_change(coins, amount):
 
 </details>
 
-## Longest Increasing Subsequence: length of the longest strictly increasing subsequence (not necessarily contiguous). E.g. [10,9,2,5,3,7,101,18] gives 4 (2,3,7,101). {#dsadp-lis}
-**Pattern:** patience sorting with binary search.
-**Insight:** `tails[i]` is the smallest possible tail of an increasing subsequence of length i+1. For each x, replace the first tail >= x (bisect_left), or append if none. The list length is the answer.
-**Complexity:** O(n log n) time, O(n) space. (Classic DP is O(n^2).)
+## Integer array: length of the longest strictly increasing subsequence (elements in order, not necessarily adjacent). E.g. [10,9,2,5,3,7,101,18] gives 4 (2,3,7,101). (Longest Increasing Subsequence) {#dsadp-lis}
+**Pattern:** 1D DP on "best ending at i"; the follow-up is binary search over tails.
+**Insight:** dp[i] = 1 + max(dp[j]) over j < i with nums[j] < nums[i]; answer = max(dp). Follow-up: tails[L] = smallest last value of any increasing run of length L + 1. A smaller tail is easier to extend, so each x replaces the first tail ≥ x.
+**Complexity:** O(n²) DP (say this first), O(n log n) with tails; O(n) space.
+**Edge:** duplicates do not extend a strict run (bisect_left handles it); empty → 0. `tails` is not itself an answer; only its length is.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
 
 ```python
+def lis_dp(nums):
+    dp = [1] * len(nums)
+    for i in range(len(nums)):
+        for j in range(i):
+            if nums[j] < nums[i]: dp[i] = max(dp[i], dp[j] + 1)
+    return max(dp, default=0)
+
 from bisect import bisect_left
 def lis(nums):
     tails = []
@@ -80,10 +95,12 @@ def lis(nums):
 
 </details>
 
-## Longest Common Subsequence: length of the longest subsequence shared by two strings. E.g. "abcde" and "ace" gives 3 ("ace"). {#dsadp-lcs}
-**Pattern:** 2D DP over prefixes.
-**Insight:** dp[i][j] = dp[i-1][j-1] + 1 if the characters match, else max(dp[i-1][j], dp[i][j-1]).
-**Complexity:** O(m x n) time, O(m x n) space (O(min(m,n)) with rolling rows).
+## Two strings: length of the longest sequence of characters that appears in both, in order but not necessarily adjacent. E.g. "abcde" and "ace" give 3 ("ace"). (Longest Common Subsequence) {#dsadp-lcs}
+**Pattern:** 2D DP over prefixes (dp[i][j] = answer for the first i chars of a and first j of b).
+**Insight:** if a[i−1] == b[j−1], dp[i][j] = dp[i−1][j−1] + 1; otherwise one of the two last characters is not used, so take max(dp[i−1][j], dp[i][j−1]).
+**Complexity:** O(m × n) time, O(m × n) space (O(min(m, n)) keeping two rows).
+**Edge:** either string empty → 0 (the extra zero row and column handle it).
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -100,10 +117,12 @@ def lcs(a, b):
 
 </details>
 
-## Word Break: can a string be split into a sequence of words from a dictionary (words reusable)? E.g. "leetcode" with ["leet","code"] gives true. {#dsadp-word-break}
+## A string and a dictionary of words (reusable): can the string be cut into a sequence of dictionary words? E.g. "leetcode" with ["leet","code"] gives true; "catsandog" with ["cats","dog","sand","and","cat"] gives false. (Word Break) {#dsadp-word-break}
 **Pattern:** 1D DP over prefix length.
-**Insight:** dp[i] is true if some j < i has dp[j] true and `s[j:i]` is a word. dp[0] = true for the empty prefix.
-**Complexity:** O(n^2) time (O(n^3) counting slice/hash cost), O(n) space.
+**Insight:** dp[i] is true if some j < i has dp[j] true and s[j:i] is a word: a good prefix followed by one word. dp[0] = true for the empty prefix.
+**Complexity:** O(n²) dictionary checks; O(n³) counting the cost of slicing and hashing. Limiting j to the longest word's length helps. O(n) space.
+**Edge:** greedy longest-match fails: "abcd" with ["a","abc","b","cd"] takes "abc", then "d" is stuck; a + b + cd works. Hence every split j is tried.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -119,10 +138,12 @@ def word_break(s, words):
 
 </details>
 
-## Maximum Subarray: the largest sum of any contiguous, non-empty subarray. E.g. [-2,1,-3,4,-1,2,1,-5,4] gives 6 ([4,-1,2,1]). {#dsadp-max-subarray}
-**Pattern:** Kadane's algorithm (1D DP).
-**Insight:** the best subarray ending here is either the element alone or it extended by the best ending at the previous index. A negative running sum is never worth carrying.
+## Integer array with negatives: the largest sum of any contiguous, non-empty stretch. E.g. [-2,1,-3,4,-1,2,1,-5,4] gives 6 ([4,-1,2,1]). (Maximum Subarray) {#dsadp-max-subarray}
+**Pattern:** Kadane's algorithm: 1D DP on "best sum ending here".
+**Insight:** the best stretch ending at x is either x alone or x added to the best stretch ending just before. If that running sum has gone negative, it only drags x down, so restart.
 **Complexity:** O(n) time, O(1) space.
+**Edge:** all negative ([-3,-1,-2]) → -1, the largest single element; starting best at 0 would wrongly return 0.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -138,23 +159,50 @@ def max_subarray(a):
 
 </details>
 
-## Longest Palindromic Substring: the longest substring that reads the same both ways. E.g. "babad" gives "bab" (or "aba"). {#dsadp-longest-palindrome}
-**Pattern:** expand around centre.
-**Insight:** every palindrome has a centre: a character (odd length) or a gap between two (even). Expand outward from each of the 2n-1 centres while the ends match.
-**Complexity:** O(n^2) time, O(1) space.
+## Positive integers: can they be split into two groups with equal sums (each number used exactly once)? E.g. [1,5,11,5] gives true (11 vs 1+5+5); [1,2,5] gives false. (Partition Equal Subset Sum) {#dsadp-partition-subset}
+**Pattern:** 0/1 knapsack (each item used at most once): a boolean DP over reachable sums.
+**Insight:** the question is "can some subset hit total / 2?". Keep can[s] = some subset sums to s; for each number x, update s from high to low so x is used at most once.
+**Complexity:** O(n × S) time (S = total / 2), O(S) space.
+**Edge:** odd total → false at once. Looping s upward would reuse x, turning it into the unbounded (coin-change) version.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
 
 ```python
-def longest_palindrome(s):
-    best = ""
-    for c in range(len(s)):
-        for l, r in ((c, c), (c, c + 1)):
-            while l >= 0 and r < len(s) and s[l] == s[r]:
-                l -= 1; r += 1
-            if r - l - 1 > len(best): best = s[l + 1:r]
-    return best
+def can_partition(nums):
+    total = sum(nums)
+    if total % 2: return False
+    S = total // 2
+    can = [True] + [False] * S
+    for x in nums:
+        for s in range(S, x - 1, -1):
+            can[s] = can[s] or can[s - x]
+    return can[S]
+```
+
+</details>
+
+## Grid of non-negative costs: walk from the top-left to the bottom-right moving only right or down; minimum total cost of the cells visited? E.g. [[1,3,1],[1,5,1],[4,2,1]] gives 7 (1→3→1→1→1). (Minimum Path Sum) {#dsadp-min-path-sum}
+**Pattern:** grid DP: each cell's answer from the cell above and the cell to the left.
+**Insight:** you can only arrive from above or from the left, so best[r][c] = grid[r][c] + min(best above, best left). Fill row by row; one row of memory is enough.
+**Complexity:** O(R × C) time, O(C) space.
+**Edge:** first row and first column have only one way in; a 1 × 1 grid → its own cost. Greedy "take the cheaper next step" fails.
+Grade on pattern + insight; complexity is a check.
+
+<details>
+<summary>Code</summary>
+
+```python
+def min_path_sum(g):
+    C = len(g[0])
+    row = [float('inf')] * C
+    row[0] = 0
+    for r in g:
+        row[0] += r[0]
+        for c in range(1, C):
+            row[c] = r[c] + min(row[c], row[c - 1])
+    return row[-1]
 ```
 
 </details>

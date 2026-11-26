@@ -3,10 +3,12 @@ topic: DSA · Linked List & Stack
 group: DSA
 ---
 
-## Reverse Linked List: reverse a singly linked list. E.g. 1->2->3 becomes 3->2->1. {#dsals-reverse-list}
-**Pattern:** iterative pointer reversal.
-**Insight:** walk once; for each node, save `next`, point the node back at `prev`, then advance both. `prev` ends as the new head.
-**Complexity:** O(n) time, O(1) space.
+## Singly linked list: reverse it in place and return the new head. E.g. 1->2->3 becomes 3->2->1. (Reverse Linked List) {#dsals-reverse-list}
+**Pattern:** iterative pointer reversal with three pointers (prev, current, next).
+**Insight:** walk once; for each node, save its next, point it back at prev, then step both forward. Saving next first is what stops you losing the rest of the list. prev ends as the new head.
+**Complexity:** O(n) time, O(1) space. (Recursion is O(n) stack.)
+**Edge:** empty list or single node → returned unchanged.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -23,10 +25,12 @@ def reverse_list(head):
 
 </details>
 
-## Merge Two Sorted Lists: merge two sorted linked lists into one sorted list. E.g. 1->2->4 and 1->3->4 gives 1->1->2->3->4->4. {#dsals-merge-sorted-lists}
-**Pattern:** dummy head plus two-pointer merge.
-**Insight:** a dummy node removes the "empty result" special case. Append the smaller head each step, then attach whatever list remains.
+## Two sorted linked lists: splice them into one sorted list. E.g. 1->2->4 and 1->3->4 give 1->1->2->3->4->4. (Merge Two Sorted Lists) {#dsals-merge-sorted-lists}
+**Pattern:** dummy head (a placeholder node before the real first node) plus a two-pointer merge.
+**Insight:** the dummy removes the "result is still empty" special case. Attach the smaller head each step; when one list runs out, attach the rest of the other in one go.
 **Complexity:** O(n + m) time, O(1) space.
+**Edge:** one or both lists empty → the other list (or None).
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -44,10 +48,12 @@ def merge_two(a, b):
 
 </details>
 
-## Linked List Cycle: does a linked list contain a cycle? E.g. 3->2->0->-4 with -4 pointing back to 2 gives true. {#dsals-list-cycle}
-**Pattern:** fast and slow pointers (Floyd).
-**Insight:** fast moves 2 steps, slow moves 1. If there is a cycle they must meet inside it; if fast hits the end, there is none.
-**Complexity:** O(n) time, O(1) space.
+## Linked list: does following next pointers ever loop back, using O(1) extra space? E.g. 3->2->0->-4 with -4 pointing back to 2 gives true. (Linked List Cycle) {#dsals-list-cycle}
+**Pattern:** fast and slow pointers (Floyd's cycle detection).
+**Insight:** fast moves 2 steps, slow 1. Inside a loop, fast gains one step per move, so it must land on slow; if fast reaches the end, there is no loop.
+**Complexity:** O(n) time, O(1) space. (A visited set is O(n) space.)
+**Edge:** empty list → false; one node pointing to itself → true.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -63,10 +69,12 @@ def has_cycle(head):
 
 </details>
 
-## Remove Nth Node From End: delete the nth node counted from the tail in one pass. E.g. 1->2->3->4->5, n=2 gives 1->2->3->5. {#dsals-remove-nth-from-end}
-**Pattern:** two pointers with a fixed gap.
-**Insight:** move `fast` n steps ahead of `slow`, then advance both until fast is on the last node. Slow is then just before the target. A dummy head handles removing the first node.
+## Linked list and n: delete the nth node counted from the end, in one pass. E.g. 1->2->3->4->5, n=2 gives 1->2->3->5. (Remove Nth Node From End of List) {#dsals-remove-nth-from-end}
+**Pattern:** two pointers with a fixed gap, plus a dummy head.
+**Insight:** move fast n steps ahead of slow, then move both until fast is on the last node. Slow is then just before the node to delete, so skip it.
 **Complexity:** O(n) time, O(1) space.
+**Edge:** n equal to the length removes the head; the dummy node makes that case the same as any other.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -84,10 +92,12 @@ def remove_nth(head, n):
 
 </details>
 
-## Valid Parentheses: a string of ()[]{} brackets; are they all closed in the correct order? E.g. "([])" gives true, "(]" gives false. {#dsals-valid-parentheses}
-**Pattern:** stack.
-**Insight:** push opening brackets; on a closing one, the stack top must be its matching opener. At the end the stack must be empty.
+## String of ( ) [ ] { }: is every bracket closed by the right type, in the right order? E.g. "([])" gives true; "(]" and "([)]" give false. (Valid Parentheses) {#dsals-valid-parentheses}
+**Pattern:** stack (last in, first out).
+**Insight:** the most recently opened bracket must be the first one closed, which is exactly last-in-first-out. Push openers; on a closer, the top must be its matching opener.
 **Complexity:** O(n) time, O(n) space.
+**Edge:** a closer with an empty stack ("]") → false; openers left over at the end ("((") → false.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -105,10 +115,12 @@ def is_valid(s):
 
 </details>
 
-## Min Stack: design a stack with push, pop, top and get-min all in O(1). E.g. push 2, push 1, getMin gives 1; pop; getMin gives 2. {#dsals-min-stack}
-**Pattern:** stack storing running minimum with each element.
-**Insight:** store `(value, min so far)` per entry. The current minimum is always the top entry's second field, and popping restores the previous minimum automatically.
-**Complexity:** O(1) time per operation, O(n) space.
+## Design a stack where push, pop, top and get-min are all O(1). E.g. push 2, push 1, get-min gives 1; pop; get-min gives 2. (Min Stack) {#dsals-min-stack}
+**Pattern:** stack where each entry also stores the minimum at that depth.
+**Insight:** store (value, min so far) per entry. The current minimum is the top's second field, and popping automatically restores the minimum from before that push.
+**Complexity:** O(1) per operation, O(n) space.
+**Edge:** repeated minimums (push 1, push 1, pop) still leave 1; a single shared min variable would lose it.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -126,10 +138,12 @@ class MinStack:
 
 </details>
 
-## Daily Temperatures: for each day, how many days until a warmer one (0 if none)? E.g. [73,74,75,71,69,72,76,73] gives [1,1,4,2,1,1,0,0]. {#dsals-daily-temperatures}
-**Pattern:** monotonic decreasing stack of indices.
-**Insight:** keep indices of days still waiting for a warmer day. When today is warmer than the stack top, pop it and its answer is the index gap.
+## Daily temperatures: for each day, how many days until a strictly warmer day (0 if none)? E.g. [73,74,75,71,69,72,76,73] gives [1,1,4,2,1,1,0,0]. (Daily Temperatures) {#dsals-daily-temperatures}
+**Pattern:** monotonic stack (a stack kept in sorted order: here, temperatures only decrease from bottom to top), holding indices.
+**Insight:** the stack holds days still waiting for a warmer day. When today beats the top, pop it: today is its answer (gap = today − that index). Keep popping, then push today.
 **Complexity:** O(n) time (each index pushed and popped once), O(n) space.
+**Edge:** equal temperatures are not warmer (strict <); days left on the stack keep 0.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -147,26 +161,37 @@ def daily_temps(t):
 
 </details>
 
-## LRU Cache: design a fixed-capacity cache with get(key) and put(key, value), both O(1); when full, evict the least recently used key. E.g. cap 2: put 1, put 2, get 1, put 3 evicts key 2. {#dsals-lru-cache}
-**Pattern:** hash map plus recency order (doubly linked list; Python's OrderedDict does both).
-**Insight:** the map finds a key in O(1); the ordered list moves a touched key to the "most recent" end and drops from the "oldest" end in O(1). Both get and put count as a use.
-**Complexity:** O(1) time per operation, O(capacity) space.
+## Fixed-capacity cache with get(key) and put(key, value), both O(1); when full, evict the key used longest ago. E.g. capacity 2: put 1, put 2, get 1, put 3 evicts key 2. (LRU Cache) {#dsals-lru-cache}
+**Pattern:** hash map (key → node) plus a doubly linked list ordered by recency, with dummy head and tail.
+**Insight:** the map finds the node in O(1); the node knows its prev, so it can be unlinked in O(1). Every get or put moves it to the front; evict the node before the tail.
+**Complexity:** O(1) per operation, O(capacity) space.
+**Edge:** put on an existing key updates it *and* counts as a use. OrderedDict (move_to_end, popitem(last=False)) is the shortcut; mention it, but expect to code the list.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
 
 ```python
-from collections import OrderedDict
+class Node:
+    def __init__(self, k=0, v=0): self.k, self.v, self.prev, self.next = k, v, None, None
 class LRUCache:
-    def __init__(self, cap): self.cap, self.d = cap, OrderedDict()
+    def __init__(self, cap):
+        self.cap, self.m = cap, {}
+        self.head, self.tail = Node(), Node()
+        self.head.next, self.tail.prev = self.tail, self.head
+    def _remove(self, n): n.prev.next, n.next.prev = n.next, n.prev
+    def _add_front(self, n):
+        n.prev, n.next = self.head, self.head.next
+        self.head.next.prev = n; self.head.next = n
     def get(self, k):
-        if k not in self.d: return -1
-        self.d.move_to_end(k)
-        return self.d[k]
+        if k not in self.m: return -1
+        n = self.m[k]; self._remove(n); self._add_front(n)
+        return n.v
     def put(self, k, v):
-        self.d[k] = v
-        self.d.move_to_end(k)
-        if len(self.d) > self.cap: self.d.popitem(last=False)
+        if k in self.m: self._remove(self.m[k])
+        n = self.m[k] = Node(k, v); self._add_front(n)
+        if len(self.m) > self.cap:
+            lru = self.tail.prev; self._remove(lru); del self.m[lru.k]
 ```
 
 </details>

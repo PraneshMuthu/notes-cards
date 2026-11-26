@@ -3,10 +3,12 @@ topic: DSA · Heap & Intervals
 group: DSA
 ---
 
-## Kth Largest Element: find the kth largest value in an unsorted array. E.g. [3,2,1,5,6,4], k=2 gives 5. {#dsahi-kth-largest}
-**Pattern:** min-heap of size k.
-**Insight:** keep only the k largest seen so far; the heap root is the smallest of those, which is exactly the kth largest. Replace the root whenever a bigger value arrives.
-**Complexity:** O(n log k) time, O(k) space.
+## Unsorted integer array and k: the kth largest value (counting repeats). E.g. [3,2,1,5,6,4], k=2 gives 5. (Kth Largest Element in an Array) {#dsahi-kth-largest}
+**Pattern:** min-heap of size k (a heap: a tree that hands you its smallest item in O(log n)).
+**Insight:** keep only the k largest values seen so far. The smallest of those, the heap's top, is exactly the kth largest; when a bigger value arrives, it replaces the top.
+**Complexity:** O(n log k) time, O(k) space. Quickselect (partition like quicksort, recurse into one side) is O(n) on average, O(n²) worst.
+**Edge:** repeats count separately ([3,3,1], k=2 → 3); k = n → the minimum.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -23,10 +25,12 @@ def kth_largest(nums, k):
 
 </details>
 
-## Merge Intervals: merge all overlapping intervals. E.g. [[1,3],[2,6],[8,10]] gives [[1,6],[8,10]]. {#dsahi-merge-intervals}
-**Pattern:** sort by start, then sweep.
-**Insight:** after sorting by start, an interval overlaps the last merged one only if its start is <= that one's end. Then extend the end with `max`; otherwise start a new one.
-**Complexity:** O(n log n) time, O(n) space for output.
+## List of [start, end] intervals in any order: merge every group that overlaps. E.g. [[1,3],[2,6],[8,10]] gives [[1,6],[8,10]]. (Merge Intervals) {#dsahi-merge-intervals}
+**Pattern:** sort by start, then one sweep.
+**Insight:** once sorted by start, an interval can only overlap the last merged one, and does when its start ≤ that end. Then extend the end with max (it may be swallowed whole); otherwise start a new group.
+**Complexity:** O(n log n) time, O(n) space for the output.
+**Edge:** touching intervals [1,2],[2,3] merge to [1,3]; a nested one [1,10],[2,3] must not shrink the end (hence max).
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -43,10 +47,12 @@ def merge(iv):
 
 </details>
 
-## Meeting Rooms II: given meeting [start, end) times, the minimum number of rooms needed. E.g. [[0,30],[5,10],[15,20]] gives 2. {#dsahi-meeting-rooms-ii}
-**Pattern:** sort by start plus a min-heap of end times.
-**Insight:** the heap holds end times of rooms in use. If the earliest end is <= the new start, reuse that room; else add a room. Heap size at the end is the answer.
+## Meetings as [start, end) times (end is exclusive): the fewest rooms so no two overlapping meetings share one. E.g. [[0,30],[5,10],[15,20]] gives 2. (Meeting Rooms II) {#dsahi-meeting-rooms-ii}
+**Pattern:** sort by start, plus a min-heap of the end times of rooms in use.
+**Insight:** for each meeting, if the earliest-ending room is free (end ≤ start), reuse it; else open a room. A room is added only when every room in the heap is busy at that moment, so the final heap size is the most meetings ever running at once.
 **Complexity:** O(n log n) time, O(n) space.
+**Edge:** back-to-back [1,5],[5,8] share one room because end is exclusive; no meetings → 0.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -64,10 +70,12 @@ def min_rooms(iv):
 
 </details>
 
-## Find Median from Data Stream: support adding numbers and reading the current median at any time. E.g. add 1, add 2 gives 1.5; add 3 gives 2. {#dsahi-median-stream}
-**Pattern:** two heaps (max-heap for the lower half, min-heap for the upper half).
-**Insight:** keep the halves balanced so the lower half is equal in size or one larger. The median is the lower top, or the average of both tops. Python has no max-heap, so store negatives.
+## Numbers arrive one at a time; at any moment, report the median of everything so far, with add in O(log n). E.g. add 1, add 2 gives 1.5; add 3 gives 2. (Find Median from Data Stream) {#dsahi-median-stream}
+**Pattern:** two heaps: a max-heap for the lower half, a min-heap for the upper half.
+**Insight:** keep the halves balanced (lower equal or one bigger) and every lower value ≤ every upper value. The median is then the lower top, or the average of both tops.
 **Complexity:** O(log n) per add, O(1) per median, O(n) space.
+**Edge:** Python has only a min-heap, so store the lower half negated; even count → average of the two tops.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -88,10 +96,12 @@ class MedianFinder:
 
 </details>
 
-## Non-overlapping Intervals: the minimum number of intervals to remove so the rest do not overlap. E.g. [[1,2],[2,3],[3,4],[1,3]] gives 1. {#dsahi-non-overlapping}
-**Pattern:** greedy, sort by end time (interval scheduling).
-**Insight:** always keep the interval that ends earliest, since it leaves the most room. Any interval starting before the kept end overlaps and is removed. Touching ends (2 and 2) do not overlap.
+## List of intervals: the fewest to delete so that none of the rest overlap. E.g. [[1,2],[2,3],[3,4],[1,3]] gives 1 (delete [1,3]). (Non-overlapping Intervals) {#dsahi-non-overlapping}
+**Pattern:** greedy interval scheduling: sort by **end** time.
+**Insight:** keep the interval that finishes first, because it leaves the most room for the rest. Any interval starting before the last kept end overlaps it and is deleted.
 **Complexity:** O(n log n) time, O(1) extra space.
+**Edge:** touching ends ([1,2],[2,3]) do not overlap, hence `s >= end`. Sorting by start instead keeps a long early interval that blocks many short ones.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>
@@ -108,10 +118,12 @@ def erase_overlap(iv):
 
 </details>
 
-## Merge k Sorted Lists: merge k sorted linked lists into one sorted list. E.g. [1->4->5, 1->3->4, 2->6] gives 1->1->2->3->4->4->5->6. {#dsahi-merge-k-lists}
-**Pattern:** min-heap of the current head of each list.
-**Insight:** the smallest remaining node is always one of the k heads. Pop it, append it, push its successor. Store `(val, list index, node)` so ties never compare nodes.
-**Complexity:** O(N log k) time (N total nodes), O(k) space.
+## k linked lists, each sorted: combine them into one sorted list. E.g. [1->4->5, 1->3->4, 2->6] gives 1->1->2->3->4->4->5->6. (Merge k Sorted Lists) {#dsahi-merge-k-lists}
+**Pattern:** min-heap holding the current head of each list.
+**Insight:** the smallest remaining node is always one of the k heads. Pop it, append it, push its successor. Store (value, list index, node) so equal values never compare nodes.
+**Complexity:** O(N log k) time (N total nodes), O(k) space. Merging lists one by one is O(N · k).
+**Edge:** some or all lists empty → skip None heads; all empty → None.
+Grade on pattern + insight; complexity is a check.
 
 <details>
 <summary>Code</summary>

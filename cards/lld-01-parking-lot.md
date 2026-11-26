@@ -3,68 +3,79 @@ topic: LLD 01 · Parking Lot
 group: LLD
 ---
 
-## Before coding a parking lot, which three buckets of clarifying questions do you cover? {#lld01-clarify-buckets}
-Entities (nouns), operations (verbs) and constraints (non-functional requirements).
-**Why:** the owner's first attempt probed nouns well (floors, vehicle types) but skipped verbs (ticket at entry, payment at exit) and the big constraint, concurrency.
-**Example:** "Multiple gates? Two cars entering at once?" is a constraint question. It later forces a lock around spot allocation.
+## Parking lot: before designing, which three kinds of clarifying question do you ask? Give one example of each. {#lld01-clarify-buckets}
+Entities (nouns: floors, vehicle types), operations (verbs: ticket at entry, pay at exit) and constraints (non-functional: several gates at once?).
+**Why:** nouns become classes, verbs become methods, and constraints decide the hard parts, like locking.
+**Example:** "Can two cars enter through different gates at the same moment?" is the constraint question that later forces a lock around spot allocation.
+**Trap:** asking only about nouns. You get a tidy class diagram and miss concurrency.
 
-## What are the core classes in the parking lot design? {#lld01-entities}
-`ParkingLot` → `Floor` → `ParkingSpot` (type, position, `is_occupied`, with `assign()` and `vacate()`), plus `Vehicle` (plate, type) and `Ticket` (vehicle, spot, entry/exit time). `ParkingLot` is the orchestrator with `park`, `unpark`, `is_available`.
-**Why:** each class holds only data it describes. A `Ticket` is a parking session, so entry time and spot belong there, not on `Vehicle`.
-**Trap:** putting `entry_time` and `spot` on `Vehicle`. A car is not a session.
+## Parking lot: where do a car's entry time and assigned spot belong, and why not on `Vehicle`? {#lld01-entities}
+On a `Ticket`, which models one parking session (vehicle, spot, entry and exit time).
+**Why:** a class holds only data it describes. A car exists before and after it parks; entry time belongs to the visit, not the car.
+**Example:** a cinema ticket records your seat and showtime; your Aadhaar card does not. Code: `Ticket(vehicle, spot, entry_time=now)`.
+**Trap:** `vehicle.entry_time`. The same car parking twice in a day breaks it.
 
-## Why do you need a top-level `ParkingLot` class? {#lld01-aggregate-root}
-It is the aggregate root: the one top-level object that owns the parts (floors, spots) and is the single entry point for park and unpark.
-**Why:** one `Floor` cannot choose a spot across all floors. A lot-wide operation needs a lot-wide owner.
-**Example:** a single floor supervisor cannot tell you the nearest free spot in the whole building. The building manager can.
+## Parking lot: `Floor` objects already exist. Why add a top-level `ParkingLot` class? {#lld01-aggregate-root}
+It is the aggregate root: the one object that owns all floors and is the single entry point for `park` and `unpark`.
+**Why:** "find a free spot anywhere" is lot-wide, and no single `Floor` can see the other floors.
+**Example:** a floor supervisor cannot tell you the nearest free spot in the whole mall; the building manager can. Code: `lot.park(vehicle)` loops over `self.floors`.
 
-## Which patterns does the parking lot use, and what triggers each? {#lld01-strategy-pair}
-Two Strategy patterns: `PricingStrategy` and `AllocationStrategy`. The spec said both "might change later".
-**Why:** pricing and allocation are policies that vary independently of the lot's structure. A new policy is a new class with zero edits to `ParkingLot`, `Floor` or `ParkingSpot`.
-**Example:** hourly pricing to flat pricing, or nearest to cheapest spot, is a new strategy class.
+## Parking lot spec: "the pricing rule and the spot-choosing rule might change later". How do you model them? {#lld01-strategy-pair}
+As two Strategy interfaces, `PricingStrategy` and `AllocationStrategy`, each injected into `ParkingLot`. A new rule is a new class.
+**Why:** both are policies that change independently of the lot's structure, so new rules need zero edits to `ParkingLot`, `Floor` or `ParkingSpot` (Open/Closed).
+**Example:** hourly to flat pricing is `FlatPricing()`; nearest to cheapest spot is `CheapestFirst()`.
+**Trap:** storing the hourly rate on the `Vehicle` enum. A price change then edits `Vehicle`, which should change only when vehicles do.
 
-## What are "mechanism" and "policy", and how do they split `Floor` from `AllocationStrategy`? {#lld01-mechanism-policy}
-Mechanism is what is possible. Policy is what to choose. `Floor.get_available_spots(type)` is the mechanism, and the `AllocationStrategy` picks one of them.
-**Why:** the owner first hard-coded `findNearestFreeSpot` on `Floor`, so "nearest" could not be swapped. It is a policy, so it belongs in a strategy.
-**Trap:** keeping a policy method on the domain class while also having a strategy for it.
+## Parking lot: should "find the nearest free spot" be a method on `Floor` or inside the allocation strategy? {#lld01-mechanism-policy}
+`Floor` exposes the mechanism, `get_available_spots(type)` (what is possible); the strategy holds the policy, choosing one of them (what to pick).
+**Why:** "nearest" is one choice among many. Hard-coded on `Floor`, it cannot be swapped for "cheapest" or "closest to lift".
+**Example:** a hotel front desk lists free rooms (mechanism); the guest's preference picks one (policy).
+**Trap:** keeping `find_nearest_free_spot()` on `Floor` while also adding an `AllocationStrategy`. Now the policy lives in two places.
 
-## What must you state to define "nearest free spot"? {#lld01-nearest-assumption}
-A reference point (the entrance) and a metric. Spot positions restart per floor, so order by a composite key `(floor.level, position)`.
-**Why:** `min(position)` alone breaks across floors, since spot 3 exists on every floor. Declared assumptions read as rigor, hidden ones as luck.
+## Parking lot: what must you state to make "nearest free spot" well defined? {#lld01-nearest-assumption}
+A reference point (the entrance) and a metric. Since spot numbers restart per floor, order by a composite key `(floor.level, position)`.
+**Why:** `min(position)` alone breaks across floors, because spot 3 exists on every floor. Stated assumptions read as rigour; hidden ones as luck.
+**Example:** spots (floor 2, pos 1) and (floor 0, pos 5): by `(level, position)` the ground-floor spot wins, which matches a driver entering at ground level.
 
-## What are the signatures of the two strategy interfaces? {#lld01-strategy-signatures}
-`calculate_price(type, entry_time, exit_time) -> price` and `allocate_spot(floors, vehicle) -> spot`.
-**Why:** an interface is its method contract, not its name. The owner first wrote them as bare names with no methods.
+## Parking lot: write the method signatures of the pricing and allocation interfaces. {#lld01-strategy-signatures}
+`calculate_price(vehicle_type, entry_time, exit_time) -> price` and `allocate_spot(floors, vehicle) -> spot | None`.
+**Why:** an interface is defined by its method contract, not its name. A bare `PricingStrategy` with no method promises nothing.
+**Example:** `FlatPricing.calculate_price(...)` returns 100 whatever the times; `HourlyPricing` uses them. Both fit the same signature.
 
-## Walk through `park()` and `unpark()` in the parking lot. {#lld01-flows}
-`park`: ask `AllocationStrategy` for a spot, call `spot.assign()`, return a `Ticket` with entry time. `unpark`: set exit time, fee from `PricingStrategy`, `spot.vacate()`, return the fee.
-**Trap:** the owner's first code never called `assign()` or `vacate()`, so spots never flipped state and two cars got the same spot. Structure looked right but state never changed.
+## Parking lot, one gate, no threads: two cars still get the same spot. What is the bug? {#lld01-flows}
+`park()` asks the strategy for a spot and issues a ticket but never calls `spot.assign()`, so the spot still looks free to the next car.
+**Why:** the structure looks right, but the state that the next decision reads never changed.
+**Example:** a hotel clerk who hands you a key but never marks the room taken on the board. Code fix: `spot = strategy.allocate_spot(...); spot.assign(vehicle); return Ticket(...)`.
 
-## `park()` on a full lot built a `Ticket(spot=None)`. What is the fix? {#lld01-bugs}
-Guard the empty result: if the strategy returns no spot, raise `ValueError` before building the ticket.
-**Why:** a `None` that flows downstream becomes a ticket for a spot that does not exist. Handle the failure case where it happens.
+## Parking lot: after a busy day the lot reports "full" while it is half empty. Where is the leak? {#lld01-release-on-unpark}
+`unpark()` computes the fee but never calls `ticket.spot.vacate()`, so every departed car keeps its spot taken (the release-on-every-exit lesson).
+**Why:** a missed release never errors; free capacity just shrinks with every exit.
+**Example:** a cloakroom that hands back coats but never frees the hooks. Code fix: `fee = pricing.calculate_price(...); ticket.spot.vacate(); return fee`.
 
-## How do you stop two gates from giving the same spot to two cars? {#lld01-concurrency}
-Lock around allocate plus assign so it is one atomic step, or use an atomic compare-and-set on the spot.
-**Why:** check-then-act is the hazard. Two threads both see spot 5 free, and both take it.
+## Parking lot is full and the allocation strategy returns `None`. What must `park()` do? {#lld01-bugs}
+Check the result and raise (or return a "lot full" error) before building a ticket.
+**Why:** a `None` that flows downstream becomes `Ticket(spot=None)`, a ticket for a spot that does not exist, which fails later and far away.
+**Example:** a car park shows "FULL" at the gate instead of handing out a ticket. Code: `if spot is None: raise LotFullError()`.
 
-## Extension: add EV or handicapped spots. What changes? {#lld01-ext-ev}
-A new spot type plus an allocation rule. If a vehicle can fit several spot types, split `VehicleType` from `SpotType` and add a compatibility map.
-**Why:** v1 was exact match only. The map keeps that rule in data, not in `if` chains.
+## Parking lot with several entry gates: where exactly is the check-then-act race, and what must be atomic? {#lld01-concurrency}
+Between `allocate_spot` (sees spot 5 free) and `spot.assign()`. Allocate plus assign must run under one lock, or `assign` must be an atomic compare-and-set that fails if already taken.
+**Why:** two gate threads can both pick spot 5 before either assigns it.
+**Example:** two valets both reading "spot 5 free" from the whiteboard and driving there.
 
-## Give the 60-second pitch for the parking lot. {#lld01-pitch}
-Core entities: `ParkingLot` → `Floor` → `ParkingSpot`, plus `Vehicle` and `Ticket`. Entry asks an `AllocationStrategy` for the nearest free compatible spot, marks it occupied and issues a ticket. Exit computes the fee via a `PricingStrategy` and frees the spot.
-**Why:** both policies are strategies, so EV spots, cheapest-spot or flat pricing are extensions, not rewrites.
+## Parking lot extension: add EV and accessible spots, where some vehicles fit several spot types. What changes? {#lld01-ext-ev}
+Split `VehicleType` from `SpotType` and add a compatibility map, `{CAR: [COMPACT, LARGE, EV], ...}`, that the allocation strategy consults.
+**Why:** v1 was exact match only. A map keeps the fitting rule in data, not in growing `if` chains.
+**Example:** an EV car can take an EV spot or a normal one; a bike cannot take an EV charger. Code: `if spot.type in COMPATIBLE[vehicle.type]`.
 
-## What did `unpark()` forget, and what is the rule? {#lld01-release-on-unpark}
-It computed the fee but never called `ticket.spot.vacate()`, so the spot stayed occupied forever. Every acquire needs a matching release.
-**Why:** same family as `park()` forgetting `assign()`. Structure looked right but state never changed.
+## Parking lot fee: per-hour rate by vehicle type, car parked 90 minutes. How many hours do you bill, and what is the formula? {#lld01-spec}
+2 hours: `hours = max(1, ceil(seconds / 3600))`, fee = hours × rate for that vehicle type.
+**Why:** rounding up is the usual parking rule, and `max(1, …)` bills a 5-minute stay as one hour.
+**Example:** 90 min = 5400 s; 5400 / 3600 = 1.5, so ceil gives 2. At ₹40/hour for a car, the fee is ₹80.
+**Trap:** `int(exit - entry)`. Subtracting datetimes gives a `timedelta`; use `.total_seconds()`.
 
-## Why must price not live in the `Vehicle` enum? {#lld01-price-not-on-vehicle}
-Price is a policy, not an intrinsic property of a vehicle. It belongs in `PricingStrategy`.
-**Why:** SRP (one class, one reason to change) and Open/Closed (extend, do not edit). If price sits in the enum, changing pricing means editing `Vehicle`.
-
-## What is the finalized parking lot spec for matching and fees? {#lld01-spec}
-Each vehicle parks only in its matching spot type (exact match only in v1). Fee = time × per-hour rate, where the rate varies by vehicle type, and hours round up: `max(1, ceil(seconds / 3600))`.
-**Why:** exact match keeps v1 simple. Spot sizes that fit several vehicle types are an extension.
-**Example:** 90 minutes of parking bills as 2 hours.
+## Give the parking lot design as four beats. {#lld01-pitch}
+1. `ParkingLot` → `Floor` → `ParkingSpot`, plus `Vehicle` and a `Ticket` per session.
+2. Entry: an `AllocationStrategy` picks a compatible spot, which is assigned atomically, and a ticket is issued.
+3. Exit: a `PricingStrategy` computes the fee and the spot is vacated.
+4. Both policies are strategies, so EV spots or flat pricing are new classes, not rewrites.
+Grade Got it only if you said all four beats.

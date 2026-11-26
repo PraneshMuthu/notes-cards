@@ -3,69 +3,84 @@ topic: LLD 06 · Ride-sharing
 group: LLD
 ---
 
-## What scope do you lock for a ride-sharing LLD? {#lld06-scope}
-Rider, Driver (location plus status), Trip lifecycle, nearest-driver matching, base-plus-per-km fare with surge, and no double-assigned driver. Out: real maps, ratings, payments, ride types, geo-index, persistence.
-**Why:** straight-line grid distance is enough. Say the rest is out of scope and move on.
+## Ride-sharing LLD in 45 minutes: what do you cut from scope, and which one guarantee must survive? {#lld06-scope}
+Cut real maps (use straight-line distance), payments, ratings, the geo-index and persistence. Keep the guarantee that no driver is ever on two active trips.
+**Why:** fares and matching can be imperfect and still safe, but a double-booked driver is a correctness bug, and that is where the interviewer probes.
+**Example:** one auto driver accepting two Ola rides at the same signal. Everything else can wait for v2.
 
-## What is the trip lifecycle, and what can cancel? {#lld06-trip-lifecycle}
-REQUESTED → DRIVER_ASSIGNED → IN_PROGRESS → COMPLETED, plus CANCELLED. Either side can cancel before the trip starts. Once started, the only option is to end it.
-**Why:** illegal moves must raise an error, such as ending a trip that never started.
+## Ride-sharing: what is the trip's status flow, including where the cancel branch leaves it? {#lld06-trip-lifecycle}
+REQUESTED → DRIVER_ASSIGNED → IN_PROGRESS → COMPLETED. CANCELLED is reachable only from REQUESTED or DRIVER_ASSIGNED; once started, a trip can only end.
+**Why:** every other move (end a trip that never started, cancel a finished one) must raise an error, so the flow is the spec for those errors.
+**Example:** you can cancel your Uber while the driver is on the way, not halfway to the airport.
 
-## Which patterns does the ride-sharing design use, and what triggers each? {#lld06-patterns}
-- Strategy for matching: the matching rule will change.
-- Strategy plus Decorator for pricing: surge stacks on any base fare.
-- State for the trip: legal moves depend on the trip status.
-- Lock-guarded check-and-set on `Driver`: two riders may grab the same driver.
-**Why:** it is the LLD twin of HLD ride-hailing. LLD is classes and correctness in one process, HLD is scale.
+## Ride-sharing: assign, start, end and cancel are each legal in some trip statuses and not others. How do you avoid a 4 × 5 if/elif grid? {#lld06-trip-state}
+One class per status behind a `TripState` interface; `Trip` delegates each action to its current state. The base class raises `InvalidTransitionError` for everything, and each state overrides only its legal moves.
+**Why:** here the transitions carry work (end prices the trip and frees the driver, cancel frees the driver), so per-status classes earn their keep; COMPLETED and CANCELLED override nothing, so they are final for free.
+**Example:** adding DRIVER_ARRIVED is one new class plus a change to the one state that leads into it.
 
-## Why is `TripState` a State pattern, not an if/elif on status? {#lld06-trip-state}
-Four actions × five statuses is twenty cases spread over four methods. With State, each status's rules live in one small class.
-**Why:** the base class makes every action raise `InvalidTransitionError`. Each state overrides only its legal moves, and Completed and Cancelled override nothing, so they are final.
-**Example:** add `DRIVER_ARRIVED` by adding one class and changing the one state that leads into it.
+## Ride-sharing: surge (×1.5) must stack on any base fare, with no surge flag inside each pricing class. How? {#lld06-surge}
+A wrapper that is itself a `PricingStrategy`, holds an inner one, and multiplies its fare: `SurgePricing(StandardPricing(50, 12), 1.5)`. That is a Decorator.
+**Why:** the wrapper and the wrapped share one interface, so wrappers stack (night charge, coupon) and no base class ever learns about surge.
+**Example:** 5 km: (50 + 12 × 5) × 1.5 = 110 × 1.5 = 165.
+**Trap:** a `surge` flag in `StandardPricing`; every new rule becomes another flag.
 
-## How does `SurgePricing` work, and what pattern is it? {#lld06-surge}
-`SurgePricing(inner, multiplier)` wraps another `PricingStrategy` and multiplies its fare. Since it wraps the same interface and adds to the result, it is strictly a Decorator.
-**Example:** `SurgePricing(StandardPricing(50, 12), 1.5).fare(5) = (50 + 12×5) × 1.5 = 165`.
-**Trap:** a surge flag inside `StandardPricing`. Every new rule becomes another flag.
+## Ride-sharing: two riders request at the same instant and both rank driver D1 first. Where exactly does the race bite, and which method closes it? {#lld06-driver-race}
+Both see D1 AVAILABLE and both set it ON_TRIP. `Driver.try_assign()` does the check and the set under D1's own lock and returns False to the loser.
+**Why:** the check and the write must be one atomic step; a lock around only the write still lets both pass the check.
+**Example:** two people both see the last seat in a shared auto and both sit down.
 
-## What is the race in `request_ride`, and how is it fixed? {#lld06-driver-race}
-Two riders rank the same drivers, both see D1 AVAILABLE, and both set it ON_TRIP. Fix: `Driver.try_assign()` does check-and-set under the driver's own lock. It returns False if someone beat you.
-**Trap:** locking only the write does not help. The check must be inside the lock too.
+## Ride-sharing: the ranked driver list can be stale by the time you claim a driver. Why is it safe to rank without a lock? {#lld06-stale-ranking}
+Ranking only proposes candidates; `try_assign()` is the real guard. A stale candidate just returns False and the service tries the next one.
+**Why:** locking during the scan would serialise every ride request in the city and buy nothing the claim does not already guarantee.
+**Example:** phoning hotels from a list printed an hour ago: a full one says no, so you call the next.
+**Trap:** forgetting the end case: if every candidate fails, cancel the trip and raise `NoDriverAvailableError`.
 
-## Why is ranking done without a lock, and is a stale list a problem? {#lld06-stale-ranking}
-Ranking only produces candidates, and `try_assign()` is the real guard. The service loops over ranked drivers until one claim succeeds. A stale candidate just fails and the next is tried.
-**Why:** locking during the scan slows every request and gains nothing. If none succeeds, cancel the trip and raise `NoDriverAvailableError`.
+## Ride-sharing: one service-wide lock or one lock per driver? Pick one and justify it. {#lld06-lock-granularity}
+Per-driver, taken inside `try_assign()`: riders in different areas never wait on each other and contend only for the same driver.
+**Why:** each claim holds exactly one lock, so there is no lock ordering to get wrong and no deadlock. A global lock is also correct, just slower under load.
+**Example:** each auto stand has its own queue; you don't make the whole city queue at one counter.
 
-## Per-driver lock or one global service lock? {#lld06-lock-granularity}
-Either is correct, and you should say why. Per-driver is `Driver._lock`, taken inside `try_assign()`, so riders in different parts of the city never wait on each other. They only compete for the same driver. A global lock is simpler to explain.
+## Ride-sharing: the driver taps Start while the rider taps Cancel. What goes wrong, and what is the fix? {#lld06-trip-race}
+Both pass the DRIVER_ASSIGNED check: cancel frees the driver while start moves the trip to IN_PROGRESS, so a driver mid-trip shows AVAILABLE and can be double-booked. Fix: a per-trip lock around every transition.
+**Why:** the state check and the state change are separate steps; the lock makes each transition one step, so the second tap sees the new status and raises.
+**Example:** two lift buttons pressed together: the controller handles one request at a time, never both halfway.
 
-## What is the second race on the trip itself? {#lld06-trip-race}
-The driver taps Start while the rider taps Cancel. Both see `DriverAssignedState`, so cancel frees the driver while start moves the trip to IN_PROGRESS. The driver is now AVAILABLE mid-trip and can be double-booked.
-**Why:** `Trip` holds a small lock around its transitions.
+## Ride-sharing: add Mini and Sedan with different fares. Which parts change, and what stays untouched? {#lld06-ext-ride-types}
+`Driver` and the request gain `vehicle_type`; matching filters on it; pricing becomes `dict[VehicleType, PricingStrategy]`. `Trip` and its states do not change.
+**Why:** vehicle type is a matching and pricing policy, not a lifecycle change, so it lands only in the pluggable parts.
+**Example:** on Ola, Auto and Prime Sedan have different fares but the same request → assigned → started → ended flow.
 
-## What common mistakes leave a driver stuck? {#lld06-mistakes}
-- Forgetting to release the driver on cancel or end: the driver stays ON_TRIP and the fleet shrinks.
-- Matching OFFLINE drivers or drivers 50 km away: filter on status and radius.
-- `if status` chains in `RideService`: the rules belong in the state classes.
+## Ride-sharing: 10 million drivers. What breaks in matching, and what replaces it? {#lld06-scale}
+Nearest-driver is an O(N) scan per request. Replace it with a geohash (a short string naming one square of a map grid): bucket drivers by cell and search only the rider's cell and its 8 neighbours.
+**Why:** matching sits behind the strategy interface, so a geo-index is one new class and `RideService` is untouched.
+**Example:** 10M drivers × 1,000 requests/s = 10 billion distance checks per second for the scan.
 
-## Extension: add ride types such as Mini and Sedan. What changes? {#lld06-ext-ride-types}
-Add `vehicle_type` to `Driver` and the request. Matching filters on it, inside the strategy or a decorator around it. Pricing becomes `dict[VehicleType, PricingStrategy]`. `Trip` and its states stay the same.
+## Ride-sharing: fares (per-km, flat, surge) differ by formula. Why is Template Method the wrong pattern for pricing? {#lld06-atlas}
+Template Method (a base class fixes the steps; subclasses fill in some) needs a shared sequence of steps. Fare formulas share none, so use a pluggable pricing interface, with wrappers for add-ons like surge.
+**Why:** a template whose skeleton is empty is just one abstract method, i.e. a strategy with extra inheritance.
+**Example:** Splitwise's split does have a skeleton (validate → compute shares → check they sum to the total), so Template Method fits there.
 
-## What breaks with 10 million drivers? {#lld06-scale}
-`NearestDriverStrategy` is an O(N) linear scan per request. The HLD fix is to bucket drivers by geohash cell and look at the rider's cell and its neighbours.
-**Why:** it sits behind the strategy interface, so a geo-index strategy is one new class and the rest does not change.
+## Ride-sharing: tell the rider on driver-assigned and on arrival, without `RideService` knowing about SMS or push. How? {#lld06-atlas-observer}
+`RideService` keeps a list of listeners and calls `on_event(trip_event)` on each; SMS and push are listener classes (Observer).
+**Why:** a new channel is one new listener; the code that runs the trip never changes.
+**Example:** a school WhatsApp group: the teacher posts once instead of phoning every parent.
 
-## Which candidates and rejections are in the pattern atlas? {#lld06-atlas}
-Candidates: Observer (notify rider on assign or arrival), more decorators (`Coupon(NightCharge(Surge(Standard)))`), Factory (pricing and matching pair per vehicle type).
-Rejected: Singleton for `RideService` (hurts tests), Template Method for pricing (formulas share no fixed steps).
+## Ride-sharing: matching rules will change (nearest, highest-rated, geohash). What interface does `RideService` call, and what does it return? {#lld06-matching}
+`DriverMatchingStrategy.rank(pickup, drivers)` returns AVAILABLE drivers within the radius (5 km by default), closest first.
+**Why:** a new rule is one new class; `RideService` only loops over whatever list comes back.
+**Example:** Swiggy picking a delivery partner: nearest today, nearest-with-good-rating tomorrow, same calling code.
+**Trap:** forgetting the filter, so OFFLINE, ON_TRIP or 50-km-away drivers get matched.
 
-## What is the `DriverMatchingStrategy` seam? {#lld06-matching}
-`rank(pickup, drivers)` returns AVAILABLE drivers within the radius, closest first. Driver statuses are AVAILABLE, ON_TRIP and OFFLINE.
-**Why:** a new rule (highest-rated, geohash) is one new class and `RideService` does not change.
+## Ride-sharing: ending a trip does three things. What are they, and which one is easy to forget? {#lld06-end-trip}
+Compute the fare via the injected `PricingStrategy`, move the driver to the drop point, and release the driver to AVAILABLE. The release is the one people forget.
+**Why:** a missed release leaves the driver ON_TRIP forever, so the fleet silently shrinks; cancel needs the same release.
+**Example:** a hotel that checks you out but never marks the room clean: it is never rented again.
 
-## What happens when a trip ends? {#lld06-end-trip}
-`InProgressState.end()` computes the fare via the injected `PricingStrategy`, moves the driver to the drop point, and releases the driver back to AVAILABLE.
-**Why:** forgetting the release leaves the driver ON_TRIP forever.
+## Give the ride-sharing design as four beats. {#lld06-pitch}
+1. Rider, Driver, Location, Trip, with `RideService` on top.
+2. Matching is a pluggable strategy; pricing is a strategy with surge as a wrapper.
+3. Trip status is one class per state, so illegal moves raise.
+4. Race: two riders grab one driver, fixed by `try_assign()` under a per-driver lock; at Uber scale a geohash replaces the scan.
 
-## Give the 60-second pitch for ride-sharing. {#lld06-pitch}
-Rider, Driver, Location and Trip, with `RideService` on top. Matching is a Strategy and pricing is a Strategy with surge as a Decorator. The trip uses State, so illegal moves raise. The race is two riders grabbing one driver, fixed by `try_assign()` under a per-driver lock. Ranking can be stale. At Uber scale, a geohash replaces the scan.
+Grade Got it only if you said all four beats.
+**Example:** like describing an auto stand: drivers, a dispatcher, the fare meter, and one rule that no driver takes two fares.

@@ -3,130 +3,153 @@ topic: HLD 04 · Chat / WhatsApp
 group: HLD
 ---
 
-## Give the 30-second pitch for a WhatsApp-style chat. {#hld04-pitch}
-Each phone keeps a WebSocket (one long-lived, two-way connection) to one of ~2,000 chat servers. Redis maps user to server. A send is stored in Cassandra plus one inbox row per recipient, then ACKed (single tick), then forwarded.
-**Why:** persist first, deliver second, so a crash never loses a message. Offline users get a push and drain their inbox on reconnect.
-**Example:** posting a letter at the post office: you get a receipt (✓) once they hold it, before it reaches the neighbour.
+## Pitch a WhatsApp-style chat in 30 seconds: say the 4 beats. {#hld04-pitch}
+(1) Each phone holds a WebSocket to one of ~2,000 chat servers; Redis maps user → server. (2) A send is stored in Cassandra plus an inbox row per recipient. (3) Only then ACK the sender (✓). (4) Forward if online; otherwise push, and the phone drains its inbox on reconnect.
+**Why:** persist first, deliver second, so a crash delays a message but never loses it.
+**Example:** the post office gives you a receipt once the letter is in its sack, before it reaches your neighbour.
+**Trap:** grade Got it only if you said all 4 beats.
 
-## Why WebSocket instead of plain HTTP polling for chat? {#hld04-websocket}
-A WebSocket is one long-lived two-way TCP connection, so the server can push a message the moment it arrives.
-**Why:** with HTTP the server can only answer requests, so the phone would poll ("any new messages?"). With 200M users that wastes battery and request overhead, and adds delay.
-**Example:** a phone call you keep open versus hanging up and re-dialling every few seconds to ask "anything new?".
+## Chat: why must the phone hold a WebSocket instead of polling over HTTP? {#hld04-websocket}
+So the server can push a message the instant it arrives. A WebSocket is one long-lived two-way connection; plain HTTP only lets the server answer requests.
+**Why:** polling ("any new messages?") from 200M phones every few seconds wastes battery and billions of empty requests, and still adds up to a poll-interval of delay.
+**Example:** keeping a phone call open versus hanging up and redialling every 5 seconds to ask "anything new?".
 
-## How many chat servers do we need, and why 100K connections each? {#hld04-conn-math}
-200M concurrent sockets (40% of 500M DAU) ÷ 100K per server = 2,000 chat servers.
-**Why:** memory (100K × ~10 KB ≈ 1 GB) and CPU are not the limit; the real limit is blast radius. A dead box makes all its users reconnect at once, each redoing a TLS handshake (the encrypted-connection setup) and a session write. 100K is easy to absorb, 1M is a storm.
-**Example:** WhatsApp ran ~2M connections per box, so 100K is a cap we choose, not a hardware limit.
+## Chat: 500M DAU, 40% online at once, 100K sockets per server. How many chat servers? {#hld04-conn-math}
+2,000 chat servers: 200M concurrent sockets ÷ 100K each.
+**Why:** sockets, not messages, size this tier: each online phone holds one connection all day, even when silent.
+**Example:** 500M × 0.4 = 200M; 200M ÷ 100,000 = 2,000.
 
-## What is the peak message rate, and how does group fanout change it? {#hld04-rate-math}
-500M × 40 msg/day = 20B/day ÷ 86,400 ≈ 230K/s avg, × 3 peak ≈ 700K msg/s. Deliveries: 90% 1:1 (18B) + 10% group × 19 recipients (38B) = 56B/day ≈ 650K/s avg, ~2M/s peak.
-**Why:** fanout (copying one message to each group member) means one average group message costs ~20 deliveries; group traffic lifts the total from 20B to 56B/day. That is why groups are capped at 256 and fan out on write.
+## Chat: a server could hold 1M+ WebSockets. Why cap it at 100K? {#hld04-conn-cap}
+Blast radius: when a box dies, all its users reconnect at once. 100K reconnects are easy to absorb; 1M is a storm.
+**Why:** memory (100K × ~10 KB ≈ 1 GB) is not the limit. Each reconnect costs a TLS handshake (setting up encryption) and a session write, all in the same second.
+**Example:** WhatsApp famously ran ~2M connections per box, so 100K is a choice, not a hardware limit.
 
-## Why Cassandra for messages, and what are the partition key and clustering key? {#hld04-cassandra}
-Partition key `conversation_id` (rows stored together on one node), clustering key `message_id` DESC (sorts rows inside the partition).
-**Why:** 700K writes/s and storage of 20B × 200 B = 4 TB/day × 365 ≈ 1.5 PB × 3 replicas ≈ 4.4 PB/year, always read as "one chat, newest first". "Last 50 messages" is one read on one node, and you add capacity by adding nodes. Sharded MySQL could work but you build resharding yourself.
-**Example:** a filing cabinet with one drawer per chat, papers sorted by date.
+## Chat: from 500M DAU × 40 messages/day, derive the peak send rate. {#hld04-rate-math}
+~700K messages/s at peak: 20B/day ÷ 86,400 ≈ 230K/s average, × 3.
+**Why:** this, not the 2,000 socket servers, sizes the message service and Cassandra write path.
+**Example:** 500M × 40 = 20B/day; 20B ÷ 86,400 ≈ 231K/s; × 3 ≈ 700K/s.
 
-## How does a message find the recipient's chat server among 2,000? {#hld04-session-map}
-Each chat server writes `SET session:B chat-server-2 EX 120` to Redis on connect. The sender's server looks it up and forwards over gRPC (an RPC framework for server-to-server calls).
-**Why:** broadcasting to all 2,000 servers means ~4B internal msgs/s with 1,999 of 2,000 wasted. `EX` is a TTL (time-to-live), so a crashed server's keys expire within 120 s.
-**Trap:** count the TTL refreshes too: 2M GET + 3.3M EXPIRE = 5.3M ops/s ÷ ~100K per node ≈ 50 shards (lookups alone ~20; ~25 if a pipelined node does 200K).
+## Chat: 10% of messages go to groups with ~19 other members on average. How does that change deliveries? {#hld04-group-deliveries}
+Deliveries nearly triple: 18B one-to-one + 2B × 19 = 38B group = 56B/day, ~2M/s at peak.
+**Why:** fanout (copying one message to each member) makes a group message cost ~19 deliveries, so 10% of sends become two-thirds of deliveries. That is why groups are capped at 256.
+**Example:** one "happy birthday" in a 20-person family group is 19 deliveries.
 
-## What is the inbox table and why write it before delivering? {#hld04-inbox}
-`inbox` has partition key (PK) `user_id` and clustering key (CK) `message_id`: one row per undelivered message per recipient. It is written before delivery and deleted when the phone ACKs.
-**Why:** crash, offline and reconnect all go through the same "drain inbox" path, so a message is never lost. The socket is a fast path; the inbox is the source of truth for "not yet delivered".
-**Example:** a pigeonhole for each person at a hotel desk: the note sits there until they collect it.
+## Chat: which partition key and clustering key for the messages table, and why? {#hld04-cassandra}
+Partition key `conversation_id` (rows stored together on one node); clustering key `message_id` descending (sort order inside it).
+**Why:** the read is always "one chat, newest first", so "last 50 messages" is one sequential read on one node. Cassandra suits ~700K writes/s and ~1.5 PB/year of raw data.
+**Example:** a filing cabinet with one drawer per chat, papers sorted newest on top.
 
-## Why is the inbox row a pointer, not a copy of the message? {#hld04-inbox-pointer}
-The inbox holds only `(user_id, message_id, conversation_id)`. To drain, the server reads the inbox, then fetches bodies from `messages`.
-**Why:** copying the body would skip the second read but store a 256-member group message up to 255 times.
-**Trap:** an inbox is delete-heavy, which in Cassandra leaves tombstones (deleted markers reads must skip). It is fine here since a user's partition is usually empty or tiny; mitigate with a TTL, and name DynamoDB as the switch. Redis is not suitable because a node failure could lose messages.
+## Chat: B is connected to one of 2,000 chat servers. How does A's message find that server? {#hld04-session-map}
+On connect, B's server writes `SET session:B chat-server-2 EX 120` in Redis. The sender's side looks it up and forwards over gRPC (server-to-server calls).
+**Why:** broadcasting to all 2,000 servers wastes 1,999 of every 2,000 sends. `EX 120` is a TTL (expiry), so a crashed server's entries vanish within 2 min.
+**Example:** a hotel reception desk's "guest → room number" register.
 
-## How do you drain a long-offline user's inbox on reconnect? {#hld04-drain}
-Page through inbox rows 100 at a time, oldest first. Group the rows by conversation, fetch bodies with one query per conversation, push them as a batch, wait for the ACK, then delete those 100 rows.
+## Chat: what is the inbox table, and why write it before delivering? {#hld04-inbox}
+One row per undelivered message per recipient (partition key `user_id`), written before delivery and deleted when the phone ACKs.
+**Why:** crash, offline and reconnect all go through one "drain the inbox" path, so a message is never lost. The socket is a fast path; the inbox is the truth for "not yet delivered".
+**Example:** a pigeonhole at the hotel desk: the note sits there until the guest collects it.
+
+## Chat: why is an inbox row a pointer, not a copy of the message? {#hld04-inbox-pointer}
+It holds only `(user_id, message_id, conversation_id)`; draining reads the inbox, then fetches bodies from `messages`.
+**Why:** a copy would save one read but store a 256-member group message up to 255 times.
+**Example:** a parcel-locker SMS tells you which locker; it doesn't contain the parcel.
+**Trap:** the inbox is delete-heavy, so in Cassandra it leaves tombstones (delete markers reads must skip); fine while partitions stay tiny.
+
+## Chat: B was offline for a week. How does the phone drain its inbox on reconnect? {#hld04-drain}
+Page through inbox rows 100 at a time, oldest first; fetch bodies per conversation, push the batch, wait for the ACK, then delete those 100 rows.
 **Why:** if the socket drops halfway, unACKed rows are still there, so the next connect resumes where it stopped.
-**Example:** 300 missed messages means 300 rows, so 3 pages.
+**Example:** 300 missed messages = 3 pages; the connection drops after page 2, and page 3 is still waiting next time.
 
-## Why not just use the phone's timestamp to order messages? {#hld04-ordering}
-Phone clocks are wrong, sometimes by minutes. The server assigns a Snowflake id (64-bit: 41 bits timestamp, 10 bits machine id, 12 bits sequence), so sorting by id roughly sorts by time.
-**Why:** it needs no coordination between machines, and as the clustering key it keeps each chat sorted. Capacity ≈ 1,024 machines × 4,096 ids/ms, far above the 700K/s needed.
-**Trap:** "roughly" means a few ms of clock skew. If strict order is needed, use a per-conversation `INCR seq:{conversation_id}` in Redis, at the cost of a hot key in busy groups.
+## Chat: why not order messages by the phone's timestamp? {#hld04-ordering}
+Phone clocks are wrong, sometimes by minutes. The server assigns a Snowflake ID (time first, then machine, then counter), so sorting by ID roughly sorts by time.
+**Why:** server clocks are kept close by NTP (network time sync) and each server mints IDs with no coordination. The ID is also the clustering key, so each chat stays sorted.
+**Example:** a phone set 5 minutes fast would make its reply appear above the question it answers.
+**Trap:** "roughly" means a few ms of skew; for strict order use a per-chat Redis counter, at the cost of a hot key in busy groups.
 
-## Snowflake has a 10-bit machine id (1,024 max) but we have 2,000 chat servers. What gives? {#hld04-snowflake-bits}
-Ids are minted by a separate message-service tier of ~200 boxes, which fits in 1,024. If merged into chat servers, change the split to 11 machine bits (2,048) + 11 sequence bits.
-**Why:** two processes must never share a machine id or they can mint the same id in the same millisecond. Each process claims its id at startup (ZooKeeper/etcd or the Kubernetes pod number).
-**Trap:** if the clock goes backwards (NTP correction), wait until it catches up before issuing ids.
+## Chat: Snowflake allows 1,024 machine IDs (10 bits), but there are 2,000 chat servers. What gives? {#hld04-snowflake-bits}
+IDs are minted by the separate message-service tier (~200 boxes), which fits. If merged into chat servers, use 11 machine bits (2,048) + 11 sequence bits.
+**Why:** two processes sharing a machine ID can mint the same ID in the same millisecond. 11 sequence bits still give 2,048 IDs/ms per box, far above ~1K messages/s.
+**Example:** like 4-digit employee codes: 10,000 people max, so a bigger company needs a 5th digit.
 
-## Why is the message service its own tier, separate from chat servers? {#hld04-message-service}
-Chat servers only hold sockets and pass frames over gRPC. The stateless message service assigns ids, persists, finds recipients and routes.
-**Why:**
-- deploys: restarting a chat server drops ~100K sockets (reconnect wave), and business logic changes often
-- scaling: chat servers scale with connections (2,000), the message service with messages (700K/s ÷ ~5K per box ≈ 150-200)
-- Snowflake machine ids fit
-**Trap:** it costs one extra ~1 ms hop. "Same process first, split later" is also a fine answer.
+## Chat: why run the message service as its own tier instead of inside the chat servers? {#hld04-message-service}
+So chat servers stay dumb and rarely restart: a restart drops ~100K sockets into a reconnect wave, while business logic changes often.
+**Why:** the tiers also scale on different axes: chat servers with connections (2,000), the message service with messages (700K/s ÷ ~5K per box ≈ 150–200). The cost is one ~1 ms extra hop.
+**Example:** a bank keeps tellers at the counter and back-office staff separate; retraining the back office doesn't close the counters.
 
-## Why an L4 load balancer for chat, not L7? {#hld04-l4-lb}
-L4 works at the TCP level: it picks a server when the connection opens, then passes bytes through without reading them, so each of 200M long-lived sockets costs it very little.
-**Why:** it is a cost-per-connection choice. An L7 balancer (AWS ALB, nginx) also supports WebSockets but spends more CPU per connection because it decrypts and parses HTTP. Use L7 for the REST endpoints.
+## Chat: why does the WebSocket tier sit behind an L4 load balancer, not L7? {#hld04-l4-lb}
+Chat's twist: 200M sockets live for hours. L4 (TCP level) picks a server once at connect, then just passes bytes, so each idle socket costs it almost nothing.
+**Why:** an L7 balancer (HTTP-aware, e.g. ALB, nginx) can carry WebSockets but decrypts and parses traffic, costing more CPU per connection for no benefit. REST endpoints still use L7.
+**Example:** a telephone exchange connects the call once and stays out of the conversation.
 
-## How does at-least-once delivery work, and why not exactly-once? {#hld04-at-least-once}
-Each hop retries until ACKed, and both ends dedup. A → server: `client_msg_id` (phone-made UUID) via `SET dedup:{id} NX EX 3600`. Server → B: phone stores by `message_id` in local SQLite, so a repeat insert is a no-op.
-**Why:** on a flaky network you can't tell "message lost" from "ACK lost". Losing messages is unacceptable, so retry and dedup.
-**Trap:** keep the dedup TTL short: 1 h ≈ 830M keys ≈ 50 GB, 24 h ≈ 1.2 TB of RAM.
+## Chat: A sends, but the server's ✓ never reaches A. How do you avoid both losing and duplicating the message? {#hld04-at-least-once}
+A's phone resends with the same `client_msg_id` (a UUID it made); the server drops repeats via `SET dedup:{id} NX EX 3600`. B's phone also ignores a `message_id` it already stored.
+**Why:** a lost message and a lost ACK look identical to A, so A must retry; dedup at each hop turns at-least-once delivery into one visible message.
+**Example:** you tap send in a lift with no signal; it resends outside, and B still sees it once.
+**Trap:** keep the dedup TTL short: 1 h of IDs ≈ 50 GB of Redis, 24 h ≈ 1.2 TB.
 
-## When exactly does the sender see ✓, ✓✓ and blue ✓✓? {#hld04-ticks}
-✓ = server stored it (ACK sent only after the write succeeds). ✓✓ = recipient's phone sent `ack`. Blue ✓✓ = recipient's phone sent `read`.
-**Why:** the ✓ is a durability promise, so ACKing before persisting is a lie that loses messages on crash. The sender only hears about ✓✓ via `receipt` frames.
-**Example:** a courier: ✓ = picked up, ✓✓ = delivered to the door, blue = signed for.
+## Chat: when exactly does the sender see ✓, ✓✓ and blue ✓✓? {#hld04-ticks}
+✓ = the server stored it. ✓✓ = B's phone sent `ack`. Blue ✓✓ = B's phone sent `read`.
+**Why:** ✓ is a durability promise, so it is sent only after the write succeeds; ACKing earlier would lie and lose messages on a crash.
+**Example:** a courier: ✓ = collected from you, ✓✓ = on their doormat, blue = they opened it.
 
-## How are read receipts stored, and what if the sender is offline? {#hld04-cursors}
-As two cursors per member per chat in `members_by_conversation`: `last_delivered_id` and `last_read_id`. Blue ✓✓ on message 940 means the other member's `last_read_id ≥ 940`.
-**Why:** one number per member, not one row per message. Reads of 950, 960, 980 just leave it at 980. If A is offline only the live frame is skipped; the history call returns the cursors so A redraws all ticks.
-**Example:** a bookmark instead of a log of every page turned.
+## Chat: how do you store read receipts without a row per message? {#hld04-cursors}
+Two numbers per member per chat: `last_delivered_id` and `last_read_id`. Blue ✓✓ on message 940 means the other member's `last_read_id ≥ 940`.
+**Why:** a cursor only moves forward, so reading 950, 960 and 980 leaves one value, 980. If A is offline, the history call returns the cursors and A redraws all ticks.
+**Example:** a bookmark instead of a log of every page you turned.
 
-## Why store conversation members in two Cassandra tables? {#hld04-two-tables}
+## Chat: why store group membership in two Cassandra tables? {#hld04-two-tables}
 `members_by_conversation` answers "who is in this chat?" (every send); `conversations_by_user` answers "which chats am I in?" (chat list).
-**Why:** Cassandra only looks up by partition key (PK), so each question needs its own table. Joining a group writes to both. SQL would hit the same issue once ~50B membership rows force sharding.
-**Trap:** do not make `last_message_id` the clustering key (CK, the in-partition sort order) for the chat list; a CK can't be updated in place (delete + insert, more tombstones). Sort the ~200 rows on the phone.
+**Why:** Cassandra looks up only by partition key, so each question needs its own table. Joining a group writes both.
+**Example:** a school keeps a class register and each student's timetable: the same facts filed two ways.
+**Trap:** don't make `last_message_id` the clustering key of the chat list; a clustering key can't be updated in place.
 
-## How does a 256-member group message get delivered? {#hld04-group-fanout}
-Store the message once in `messages` (partition = group id), then fan out on write: 255 inbox rows, 255 Redis lookups and forwards.
-**Why:** fine because of the cap (avg group 19 recipients, behind the ~2M/s). For 100K-member channels switch to fan-out on read (members pull), which is out of scope.
-**Trap:** storing the body once per member. Store it once; only the lightweight inbox pointers fan out.
+## Chat: how is a message to a 256-member group delivered? {#hld04-group-fanout}
+Store the message once, then fan out on write: 255 inbox pointers, 255 session lookups and forwards.
+**Why:** affordable only because of the 256 cap. A 100K-member channel would switch to fan-out on read (members pull), which is out of scope.
+**Example:** a teacher posts one notice on the board and sends 40 "check the board" slips, not 40 photocopies.
 
-## How do you do presence for 200M online users? {#hld04-presence}
-No separate write: the `session:B` key is the presence key (exists = online), and clean disconnect writes `last_seen`. Subscribe-on-view: A gets B's presence only while A has B's chat open.
-**Why:** a write per heartbeat is 200M ÷ 30 s ≈ 6.7M writes/s. Batched TTL refresh every 60 s is ~3.3M/s, and presence may be stale up to the 120 s TTL.
-**Example:** a green dot only checked when you open that chat.
+## Chat: how do you know who is online without a write per heartbeat? {#hld04-presence}
+Reuse the session key: `session:B` exists means B is online. A clean disconnect writes `last_seen`.
+**Why:** writing presence on every 30 s heartbeat is 200M ÷ 30 ≈ 6.7M writes/s. Refreshing the session TTL every 60 s halves that and presence costs no extra key; it may be stale up to the 120 s TTL.
+**Example:** a hotel knows you are in because your room key is active, not because you phone reception every half hour.
 
-## What does the push service do, and is push the delivery? {#hld04-push}
-It is a stateless service between the message service and APNs (Apple) / FCM (Google). It looks up B's device token and sends a small payload with a collapse key = conversation id, only when B has no session.
-**Why:** a backgrounded app's socket is closed by the OS, so only Apple/Google can reach it. Push is a wake-up hint that can be dropped; the real message waits in the inbox.
+## Chat: who receives B's online/offline changes, and when? {#hld04-presence-subscribe}
+Only people with B's chat open: subscribe on view, unsubscribe on close.
+**Why:** broadcasting every status change to all of B's contacts multiplies presence traffic by contact count, mostly to screens nobody is looking at.
+**Example:** you see the green dot only when you open that chat, not on the chat list.
+
+## Chat: B's app is in the background. What does the push service do, and is the push the delivery? {#hld04-push}
+It sends a small APNs/FCM (Apple/Google push) wake-up with B's device token, only when B has no session. It is a hint; the message itself waits in the inbox.
+**Why:** the OS closes a backgrounded app's socket, so only Apple/Google can reach the phone, and they may drop or merge pushes.
 **Example:** a doorbell: it wakes you, but the parcel is already inside.
 
-## A chat server with 100K users dies. What happens? {#hld04-server-dies}
-Phones reconnect via the LB to other servers with jittered backoff. Session keys expire (120 s) or get overwritten. Messages meanwhile are safe in the inbox.
-**Why:** persist-first means delivery is delayed, not lost. Jitter stops all 100K reconnecting in the same instant.
+## Chat: a chat server holding 100K users dies. What happens? {#hld04-server-dies}
+Phones reconnect via the load balancer to other servers with jittered backoff (random wait); stale session keys expire or are overwritten. Undelivered messages wait in the inbox.
+**Why:** persist-first means delivery is delayed, not lost. Jitter stops 100K phones reconnecting in the same instant.
+**Example:** 100K reconnects spread over ~30 s is ~3K/s across 1,999 servers, under 2 per server per second.
 
-## Common chat design mistakes to avoid? {#hld04-traps}
-- ACKing the sender before persisting
-- ordering by phone timestamp
-- promising exactly-once instead of at-least-once + dedup
-- forgetting chat servers are stateful (needs the session map)
-- writing presence on every heartbeat
-**Why:** each one fails the first follow-up question, e.g. "what if the server crashes right after the ✓?"
+## Chat: which single ordering rule do most chat-design bugs violate? {#hld04-traps}
+Persist, then ACK, then forward.
+**Why:** ACK before the write and a crash loses a message the sender saw ✓ for. Forward before persisting and an offline recipient has nothing to drain.
+**Example:** a shop prints your UPI receipt only after the bank confirms, not when you tap Pay.
 
-## Walk through a send from A to B, both online. {#hld04-send-path}
-1. A's `send` reaches the message service, which assigns a Snowflake `message_id`.
-2. It writes `messages` plus B's `inbox` row.
-3. Only then it ACKs A (✓).
-4. It looks up `session:B` and forwards over gRPC; B's phone ACKs, the inbox row is deleted and A gets ✓✓.
-**Why:** persist first, then ACK, then forward. Inbox, drain and ticks all depend on that order. If `session:B` is missing, B is offline: the inbox row stays and a push goes out.
+## Chat: walk through a send from A to B, both online. Say the 4 beats. {#hld04-send-path}
+(1) The message service assigns a Snowflake `message_id`. (2) It writes `messages` plus B's inbox row. (3) It ACKs A (✓). (4) It looks up `session:B` and forwards; B ACKs, the inbox row is deleted, A gets ✓✓.
+**Why:** if `session:B` is missing, B is offline: step 4 becomes a push, and the inbox row waits for B's reconnect.
+**Example:** A sends "hi" at 10:00:00.000; ✓ ~20 ms later, ✓✓ when B's phone acknowledges.
+**Trap:** grade Got it only if you said all 4 beats.
 
-## Traffic grows 10×. What happens in chat? {#hld04-10x}
-7M msg/s peak. Chat servers, message service and Redis shards scale horizontally, and Cassandra adds nodes.
-**Why:** storage is the real cost, ~44 PB/year, so tier history older than ~90 days to cheaper storage.
+## Chat at 10× (7M messages/s): what becomes the real problem? {#hld04-10x}
+Storage cost, ~44 PB/year with 3 copies. Every tier scales by adding boxes, so move history older than ~90 days to cheaper cold storage.
+**Why:** compute grows with traffic, but stored messages pile up forever, so cost becomes the binding limit.
+**Example:** 200B messages/day × 200 B = 40 TB/day × 365 × 3 ≈ 44 PB/year.
 
-## How is a 1:1 conversation_id created without a lookup or race? {#hld04-dm-id}
-Deterministically: `"dm:" + min(A,B) + ":" + max(A,B)`. Both phones compute the same id.
-**Why:** it must exist before the first message, and a deterministic id avoids creating it twice. Groups get an id from `POST /groups`.
+## Chat: how is a one-to-one conversation_id created without a lookup or a race? {#hld04-dm-id}
+Compute it: `"dm:" + min(A,B) + ":" + max(A,B)`. Both phones get the same ID.
+**Why:** it must exist before the first message, and if both users message at once a deterministic ID can't be created twice. Groups get an ID from `POST /groups`.
+**Example:** users 42 and 7 → `dm:7:42`, whoever writes first.
+
+## Chat: how do photos and videos travel without clogging the message path? {#hld04-media}
+The phone gets a pre-signed upload URL, uploads the file straight to object storage (S3), then sends a normal small message containing the URL. Recipients download via a CDN.
+**Why:** the chat path moves ~700K tiny (~200 B) messages/s; MB-sized files through chat servers and Cassandra would multiply bandwidth and storage there.
+**Example:** you don't push a parcel through the letterbox; you leave a note saying which locker it's in.

@@ -3,69 +3,88 @@ topic: LLD 07 · Notification / Logger
 group: LLD
 ---
 
-## What is in scope for the notification service? {#lld07-scope}
-- Events, not direct calls: services publish, users subscribe to topics.
-- Email, SMS and Push behind one interface.
-- Per-user preferred channels.
-- One `{placeholder}` template per topic.
-- Retry with backoff.
-- Thread-safe subscribe and publish.
+## Notification service: the Order service calls `bus.publish(Event("OrderPlaced", ...))` and users register with `bus.subscribe("OrderPlaced", x)`. Which flavour of notify-on-event is this, and what does the middleman buy? {#lld07-observer-vs-pubsub}
+Pub/sub: subscribers register on a topic at a broker (`EventBus`), not on the publisher itself, so publisher and subscribers never reference each other.
+**Why:** a new listener (analytics, loyalty points) is one `subscribe` call, and the Order service never changes or even knows it exists.
+**Example:** a railway station announcement: the announcer speaks once to "Platform 3", whoever is standing there hears it.
 
-## Which patterns does the notification service use, and for what? {#lld07-patterns}
-- Observer (pub-sub): `EventBus` and `Subscriber`.
-- Simple Factory: `ChannelFactory`.
-- Decorator: `RetryingChannel`, `LoggingChannel`.
-- Strategy: the `Channel` interface.
-**Why:** each solves one named pain. Notify without knowing listeners, build by type, add retry once, swap delivery.
+## Notification service: add retry with exponential backoff to every channel without editing the SMS, Email or Push classes. How? {#lld07-retry-decorator}
+A `RetryingChannel` that is-a `Channel` and has-a `Channel`: `send` calls `inner.send`, and on `DeliveryError` waits `base_delay × 2^(attempt−1)` and tries again, re-raising after the last attempt.
+**Why:** it shares the interface it wraps, so layers stack at wiring time: `RetryingChannel(LoggingChannel(SMSChannel()))`, and no channel class knows about retries.
+**Example:** base 0.1 s, 3 attempts: two waits, 0.1 × 2⁰ = 0.1 s, then 0.1 × 2¹ = 0.2 s.
 
-## Is a topic-based event bus Observer or pub/sub? {#lld07-observer-vs-pubsub}
-Strictly pub/sub, the broker flavour of Observer. In Observer, subscribers register on the subject itself: `order.add_listener(x)`. In pub/sub they register on a topic at a middleman: `bus.subscribe("OrderPlaced", x)`.
-**Example:** following one friend on Instagram versus subscribing to a newspaper section.
+## Notification service: the retry wrapper waits 0.1 s then 0.2 s. How do you test those waits without the test sleeping? {#lld07-retry-test}
+Inject the sleep function: production passes `time.sleep`, the test passes `waits.append` and asserts `waits == [0.1, 0.2]`.
+**Why:** the wrapper only calls whatever `sleep` it was given, so the test records the delays instead of spending them and runs in milliseconds.
+**Example:** a stopwatch app's test doesn't wait a real minute; it checks that "60 s" was requested.
 
-## How does `RetryingChannel` add retry, and how do you test it? {#lld07-retry-decorator}
-It is-a `Channel` and has-a `Channel`. `send` calls `inner.send`. On `DeliveryError` it waits `base_delay × 2^(attempt-1)` and retries. With 3 attempts there are two waits (0.1 s, 0.2 s), then it re-raises.
-**Why:** stack at wiring: `RetryingChannel(LoggingChannel(SMSChannel()))`. Inject `sleep` so tests pass `waits.append` and assert `[0.1, 0.2]` with no real waiting.
+## Notification service: the SMS provider is down. What happens to the email for the same user? {#lld07-failure-isolation}
+It is still sent. Retry gives up on SMS and re-raises `DeliveryError`; `NotificationService.notify` catches it per channel, records it in `failures`, and moves on to email.
+**Why:** one failing channel must not abort the loop. In production failures go to a dead-letter queue (a parking queue for failed messages, replayed later).
+**Example:** your bank's OTP SMS fails, but the same alert still lands in your email.
 
-## The SMS provider is down. What happens to the other channels? {#lld07-failure-isolation}
-`RetryingChannel` tries 3 times, then re-raises `DeliveryError`. `NotificationService` catches it per channel, records it in `failures`, and still sends email.
-**Why:** one failing channel must not abort the loop. In production, failures go to a dead-letter queue (a parking queue for failed messages, replayed later).
+## Notification service: `publish` loops over a topic's subscribers while another thread unsubscribes. What breaks, and what is the fix? {#lld07-bus-race}
+Removing from a Python list mid-loop silently skips the next subscriber (Java throws `ConcurrentModificationException`). Fix: copy-on-read: under the lock take `list(subscribers)`, release, then notify from the copy.
+**Why:** the loop now walks a private copy nobody else can change, and the lock is held only for the copy.
+**Example:** subscribers [A, B, C]: while notifying A, A is removed; the list becomes [B, C], the index moves to 1, and B is never notified.
 
-## What is the race in `EventBus.publish`, and how is it fixed? {#lld07-bus-race}
-`publish` iterates the subscriber list while `unsubscribe` removes from it. In Python this silently skips an element, and in Java it throws `ConcurrentModificationException`. Fix: copy-on-read. Under the lock take `list(subscribers)`, release, then notify.
-
-## Why not hold the lock for the whole `publish`? {#lld07-lock-outside}
-Sends are slow, so every `subscribe` would wait behind them. A subscriber that calls `subscribe` or `unsubscribe` inside `on_event` deadlocks on a non-reentrant lock (a thread that already holds it blocks forever if it asks again).
+## Notification service: why not hold the bus lock for the whole of `publish`? {#lld07-lock-outside}
+Every `subscribe` would wait behind slow sends, and a subscriber that unsubscribes inside `on_event` would deadlock (a plain `Lock` blocks forever if the thread holding it asks again).
+**Why:** snapshot-then-notify keeps the critical section (the code run while holding the lock) to one list copy.
 **Trade-off:** someone who unsubscribes mid-publish may still get that one event.
+**Example:** a shop that locks its door during every delivery: nobody can walk in until the van leaves.
 
-## Why a factory registry and not `if kind == "sms"` in `notify`? {#lld07-factory}
-`ChannelFactory.create(kind)` looks up a registry dict, so `notify` never changes.
-**Example:** adding WhatsApp means writing `WhatsAppChannel` and adding one registry line.
-**Also:** Abstract Factory is rejected. There is one product family, so a Simple Factory is enough.
+## Notification service: `notify` needs a channel object for "sms", "email" or "push". How do you avoid an if/elif on the kind? {#lld07-factory}
+A registry dict from `ChannelType` to class; `ChannelFactory.create(kind)` looks it up and raises `ValueError` for an unknown kind.
+**Why:** adding WhatsApp is one new class plus one registry line, and `notify` never changes. One product family, so a simple factory beats Abstract Factory.
+**Example:** a kirana shop's price list: a new item is one new line, not a new rule for the cashier.
 
-## Extension: notify a group that contains users and sub-groups. {#lld07-composite}
-Composite. `GroupSubscriber(Subscriber)` holds a list of child `Subscriber`s (users or other groups) and forwards `on_event` to each.
-**Why:** the bus treats a group exactly like one user. It is a pure addition because `Subscriber` is already an interface.
+## Notification service: marketing wants to notify "Mumbai-Premium", a group holding users and sub-groups. How, without changing `EventBus`? {#lld07-composite}
+A `GroupSubscriber` that is itself a `Subscriber`, holds child subscribers (users or other groups) and forwards `on_event` to each (Composite).
+**Why:** the bus treats a group exactly like one user, so it is a pure addition because `Subscriber` is already an interface.
+**Example:** "Mumbai-Premium" contains "Andheri-Premium", which contains users; one event fans out down the tree.
 
-## Publishing is synchronous and slow. How do you fix it? {#lld07-async}
-Producer-consumer: `publish` puts events on a queue, and worker threads take them off and call subscribers.
-**Why:** the `EventBus` API stays the same and only its insides change.
+## Notification service: `publish` blocks until every email is sent. How do you fix it without changing the `EventBus` API? {#lld07-async}
+Producer-consumer: `publish` puts the event on a queue and returns; worker threads take events off and call the subscribers.
+**Why:** callers still call `publish(event)`; only the bus's insides change, and slow sends now cost a worker, not the caller.
+**Example:** a restaurant token counter: you order, get a token and sit down while the kitchen cooks.
 
-## How does the logger use Chain of Responsibility? {#lld07-logger-chain}
-Each `LogHandler` has a threshold and a `Sink`. `handle` writes if `level >= threshold`, then always passes to the next, so an ERROR reaches console, file and alerts.
-**Why:** this is the pass-along variant. Textbook GoF stops at the first handler that handles it.
-**Also:** `Logger.log` takes one lock around `chain.handle`, so threads cannot interleave writes to one file.
+## Logger: an ERROR must reach console, file and alerts, a DEBUG only the console. How are the handlers arranged? {#lld07-logger-chain}
+A linked line of `LogHandler`s, each with a threshold and a `Sink`: `handle` writes if `level >= threshold`, then always passes to the next (Chain of Responsibility).
+**Why:** each destination is one link, so adding or removing one never touches the others.
+**Example:** console (DEBUG+) → file (INFO+) → alerts (ERROR): an INFO line lands in console and file only.
+**Trap:** textbook GoF stops at the first handler that handles it; this is the pass-along variant.
 
-## Why not make `Logger` or `NotificationService` a Singleton? {#lld07-no-singleton}
-Hidden global state. Tests cannot give each test its own `MemorySink`, lines leak between tests, and parallel tests break.
-**Why:** inject the instance through the constructor instead.
+## Logger: two threads log at the same moment to the same file. What stops their lines interleaving? {#lld07-logger-lock}
+`Logger.log` takes one lock around `chain.handle`, so one message finishes every sink before the next message starts.
+**Why:** each sink's write is safe alone, but a message spans several sinks, so the whole pass must be one step.
+**Example:** two people dictating to one typist: without turns, you get half a sentence from each.
 
-## What does `NotificationService.notify` do? {#lld07-notify}
-It renders the topic's template with `{name}` filled in automatically, then loops over the user's preferred channels and sends on each. It is the "how"; `EventBus` is the "who".
-**Why:** they change for different reasons (quiet hours versus topic wildcards). A subscriber need not be a user either, so analytics can subscribe.
+## Logger and notification service: where exactly does a global Singleton instance hurt? {#lld07-no-singleton}
+In tests: each test wants its own `MemorySink` to assert on, but a Singleton logger shares one, so lines leak between tests and parallel tests break.
+**Why:** inject the instance through the constructor, so each test builds a fresh one.
+**Example:** two students sharing one answer sheet: you can't tell whose mistake is whose.
 
-## Extension: add a Slack destination for ERROR logs, and what are the log levels? {#lld07-logger-ext}
-One new link: `set_next(LogHandler(ERROR, SlackSink()))`. No `if level == ERROR` in the logger.
-**Also:** `LogLevel` is an `IntEnum` (DEBUG=10, INFO=20, ERROR=30) so `>=` works. `Logger.min_level` is the global filter that drops lower levels early.
+## Notification service: why are `EventBus` and `NotificationService` two classes, not one? {#lld07-notify}
+They change for different reasons: the bus decides who hears an event (topics, later wildcards); the service decides how a user is told (template, preferred channels, later quiet hours).
+**Why:** a subscriber need not be a user at all, so analytics can listen on the bus without going near templates or channels.
+**Example:** the post office sorts mail by pincode; the postman decides whether to hand it over or leave it with the watchman.
 
-## Give the 60-second pitch for the notification service. {#lld07-pitch}
-Services publish events on an `EventBus` (Observer). A `UserSubscriber` asks `NotificationService` to render the template and send on each preferred channel. Channels share one interface and come from a factory. Retry and logging are stacked Decorators. One failure does not stop the others. The race is publish versus unsubscribe, fixed by snapshot-then-notify.
+## Logger: add "send ERROR logs to Slack" without editing `Logger`. How? {#lld07-logger-ext}
+Append one link: `set_next(LogHandler(LogLevel.ERROR, SlackSink()))`.
+**Why:** the chain is open for extension; a new destination is a new link, never an `if level == ERROR` inside `Logger`.
+**Example:** adding a new CC to an email thread: nobody else's inbox rules change.
+
+## Logger: why make `LogLevel` an `IntEnum` rather than a plain `Enum`? {#lld07-log-levels}
+So `level >= threshold` is a plain integer comparison; a plain `Enum` has no ordering and `<` raises `TypeError`.
+**Why:** both the handler thresholds and `Logger.min_level` filter by "this level or higher", which needs an order.
+**Example:** this design uses its own values DEBUG 10, INFO 20, ERROR 30.
+**Trap:** quoting those as standard. Python's `logging` uses DEBUG 10, INFO 20, WARNING 30, ERROR 40, CRITICAL 50.
+
+## Give the notification service design as four beats. {#lld07-pitch}
+1. Services publish events on an `EventBus`; a `UserSubscriber` asks `NotificationService` to render the template and send.
+2. Channels share one interface and come from a factory registry.
+3. Retry and logging are stacked wrappers; one channel's failure does not stop the others.
+4. Race: publish versus unsubscribe, fixed by snapshot-then-notify.
+
+Grade Got it only if you said all four beats.

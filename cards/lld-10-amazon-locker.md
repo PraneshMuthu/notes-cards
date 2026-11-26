@@ -3,67 +3,74 @@ topic: LLD 10 · Amazon Locker
 group: LLD
 ---
 
-## Amazon Locker: what are the entities? {#lld10-entities}
-`Locker` (id, size, status), `Package` (id, size, customer), `Reservation` (package, locker, code, deposit time, failed attempts), and `LockerLocation`, the service that owns lockers and reservations and runs deposit, pickup and expiry.
-**Why:** the service is the single owner of state, so one lock can protect it.
-
-## Why a separate `Reservation` instead of putting the code on `Locker`? {#lld10-reservation}
-The code and wrong-attempt count belong to this one stay, not to the locker forever. When the parcel leaves, delete the reservation and the locker is clean.
+## Amazon Locker: the 6-digit code and the wrong-attempt count. Store them on `Locker`, or somewhere else, and why? {#lld10-reservation}
+On a separate `Reservation` (package, locker, code, deposit time, failed attempts), deleted when the parcel leaves.
+**Why:** the code belongs to this one stay, not to the locker forever; deleting the record cleans everything at once.
+**Example:** a hotel booking record, not a PIN painted on the room door.
 **Trap:** fields on `Locker` must be wiped on every exit path (pickup, expiry), and one missed path leaks a stale code.
-**Example:** a hotel booking record, not a field painted on the room door.
 
-## Which pattern picks the locker, and how does smallest-fit work? {#lld10-strategy}
-**Strategy** (swap the algorithm behind one interface): `LockerAssignmentStrategy.choose(lockers, package)`, with `SmallestFitStrategy` as default. Filter lockers that are available and `size >= package.size`, then take the min by size.
-**Why:** sizes are named constants with numbers (SMALL=1, MEDIUM=2, LARGE=3), so "fits" is `>=`. A new rule is a new class, not an edit to `deposit`.
+## Amazon Locker: the rule for choosing a locker will change. How is "pick a locker for this parcel" structured? {#lld10-strategy}
+A `LockerAssignmentStrategy.choose(lockers, package)` interface; the default `SmallestFitStrategy` keeps lockers that are available with `size >= package.size` and takes the smallest.
+**Why:** sizes are ordered numbers (SMALL=1, MEDIUM=2, LARGE=3), so "fits" is `>=`, and a new rule is a new class, not an edit to `deposit`.
+**Example:** a MEDIUM parcel with lockers S, M, L free gets M.
+**Trap:** forgetting the availability filter, which would hand out OUT_OF_SERVICE or occupied lockers.
 
-## A small parcel arrives but no SMALL locker is free. What happens? {#lld10-fallback}
-It falls back to the smallest larger free locker (MEDIUM, then LARGE). A bigger locker always fits, but smallest-fit avoids wasting big ones.
-**Trap:** exact-size matching only, which fails when a bigger box is free. Ask the interviewer, since some versions list fallback as an extension.
+## Amazon Locker: a small parcel arrives but no SMALL locker is free. What happens? {#lld10-fallback}
+It goes in the smallest larger free locker (MEDIUM, then LARGE); if none fits, `deposit` raises `NoLockerAvailableError`.
+**Why:** a bigger locker always fits, and smallest-fit avoids wasting big ones while a small one is free.
+**Example:** S full, M and L free → M.
+**Trap:** exact-size matching only, which turns parcels away while bigger boxes sit empty. Ask the interviewer, since some versions treat fallback as an extension.
 
-## Why is `LockerStatus` an enum plus a transition table, not the State pattern? {#lld10-enum-vs-state}
-The **State pattern** is one class per mode, each behaving differently for the same call (as in a vending machine). A locker has no behaviour per state, only "is this move legal?".
-**Why:** three near-empty State classes add noise. A table is one glance and hard to get wrong.
-**Extension:** adding `RESERVED` is one enum value plus one table row.
+## Amazon Locker: why does locker status not need one class per status? {#lld10-enum-vs-state}
+A locker has no per-status behaviour, only "is this move legal?", so an enum plus a transition table is enough.
+**Why:** three near-empty classes add noise; a table is one glance and hard to get wrong.
+**Example:** adding RESERVED is one enum value plus one table row.
 
-## What are the locker's legal status transitions? {#lld10-transitions}
-- `AVAILABLE` -> `OCCUPIED` or `OUT_OF_SERVICE`
-- `OCCUPIED` -> `AVAILABLE` (picked up or expired)
-- `OUT_OF_SERVICE` -> `AVAILABLE` (repaired)
+## Amazon Locker: what are the locker's legal status transitions? {#lld10-transitions}
+AVAILABLE → OCCUPIED or OUT_OF_SERVICE; OCCUPIED → AVAILABLE (picked up or expired); OUT_OF_SERVICE → AVAILABLE (repaired). Anything else raises `InvalidTransitionError`.
+**Why:** `Locker.transition_to` looks up the table, so a bad move fails loudly instead of silently corrupting state.
+**Example:** taking an OCCUPIED locker out of service raises, instead of stranding a parcel behind a "broken" door.
 
-`Locker.transition_to` looks up the table and raises `InvalidTransitionError` otherwise.
-**Why:** taking an occupied locker out of service fails loudly instead of stranding a parcel.
+## Amazon Locker: two delivery agents deposit at the same instant. Where exactly does the race bite, and what is the fix? {#lld10-race}
+Both run "find a free locker", both see S1 free, and both occupy it. Fix: `choose` and `transition_to(OCCUPIED)` run inside one lock, which pickup and expiry also take.
+**Why:** finding and occupying must be one atomic step; locking only the occupy still lets both pick S1.
+**Example:** test it: 80 threads racing for 50 lockers must get exactly 50 distinct lockers.
 
-## What is the one race in `deposit`, and how is it fixed? {#lld10-race}
-Check-then-act: two agents both run "find a free locker" and both see S1 free, then both occupy it. Fix: `choose` and `transition_to(OCCUPIED)` happen inside one `threading.Lock`. Pickup and expiry take the same lock.
-**Trap:** checking availability outside the lock, then locking only to occupy.
-**Test:** 80 threads racing for 50 lockers give exactly 50 distinct lockers.
+## Amazon Locker must tell the customer on deposit and expiry: SMS today, WhatsApp later. Which pattern, and how light can it be? {#lld10-notifier}
+Observer: `LockerLocation` holds a list of `Notifier` objects, given at construction, and calls `notify` on each after a deposit or expiry.
+**Why light:** nobody subscribes or unsubscribes at runtime, so a fixed list passed in is enough; no `subscribe()` API is needed.
+**Example:** a courier with a contact list who calls everyone on it. WhatsApp is just one more name on the list.
 
-## What is the `Notifier` pattern here? {#lld10-notifier}
-**Observer-lite**: Observer means notifying everyone who signed up when something happens. Here `LockerLocation` holds a list of `Notifier`s (`ConsoleNotifier`, later SMS or email) and calls each after a deposit or expiry. "Lite" = no per-event subscribe/unsubscribe.
-**Why:** adding WhatsApp is one new class.
-**Example:** a courier calling the contact list, whatever the channel.
+## Amazon Locker: a customer has entered 3 wrong codes, then enters the right one. What happens, and why? {#lld10-pickup}
+Rejected with `TooManyAttemptsError`: the attempt cap is checked before the code is compared.
+**Why:** it stops guessing; a 6-digit code has 1,000,000 values, and 3 tries give a guesser a 3-in-a-million chance.
+**Example:** an ATM that keeps your card after 3 wrong PINs, even if the fourth is right.
 
-## How does pickup work, and what is the wrong-attempt rule? {#lld10-pickup}
-Pickup takes package id + 6-digit code. If `failed_attempts >= 3` it raises `TooManyAttemptsError`, even for the right code. A wrong code increments the counter. A right one frees the locker and marks the package `PICKED_UP`.
-**Why:** it stops code guessing. Keying by package id gives the 3-tries rule something to count against.
-
-## How are codes generated, and can two parcels share one? {#lld10-codes}
-`_new_code()` uses `secrets` (not `random`, which is predictable) and retries until the code is not used by any active reservation at this location.
+## Amazon Locker: how should the 6-digit pickup code be generated? {#lld10-codes}
+With `secrets` (`f"{secrets.randbelow(1_000_000):06d}"`), regenerating if an active reservation at this location already has that code.
+**Why:** `random` is predictable from past outputs, and uniqueness matters if a kiosk looks the parcel up by code alone.
+**Example:** like an OTP: it must be both unguessable and not collide with another live one.
 **Trap:** using `random` for anything that unlocks something.
-**Why:** unique-per-location matters if kiosks look the parcel up by code alone.
 
-## How do you test expiry after 3 days without waiting? {#lld10-clock}
-Inject the clock: `clock: Callable[[], datetime]`. Production passes `datetime.now`; tests pass a `FakeClock` and call `advance(days=3)`. A scheduler job runs `expire_overdue()` every hour; the scheduling itself is out of scope.
-**Trap:** calling `datetime.now()` directly makes expiry untestable.
+## Amazon Locker: parcels expire after 3 days. How do you test that in a unit test that runs in milliseconds? {#lld10-clock}
+Inject the clock: `LockerLocation(clock=...)`; production passes `datetime.now`, the test passes a `FakeClock`, calls `advance(days=3)` and then `expire_overdue()`.
+**Why:** expiry compares `clock()` with the deposit time, so moving the fake clock is the same as waiting.
+**Example:** a scheduler would call `expire_overdue()` hourly in production; the test just calls it once after advancing.
 
-## Expiry marks the locker AVAILABLE, but the parcel is still inside. Problem? {#lld10-expiry-assumption}
-Yes. `expire_overdue()` scans reservations older than max age, releases each (locker AVAILABLE, package `RETURNED_TO_SENDER`), then notifies. This assumes the return courier empties the box in the same sweep. If not, kill only the code (package `EXPIRED`) and keep the locker `OCCUPIED` until staff confirm removal.
-**Why:** otherwise the next agent is sent to a box still holding a parcel.
+## Amazon Locker: expiry marks the locker AVAILABLE while the parcel may still be inside. What goes wrong, and what is the safer flow? {#lld10-expiry-assumption}
+The next agent is sent to a box still holding a parcel. Safer: expire only the code (package EXPIRED) and keep the locker OCCUPIED until staff confirm removal.
+**Why:** the simple version assumes the return courier empties the box in the same sweep; if that is not guaranteed, status must follow the physical box.
+**Example:** a hotel can't give your room to the next guest just because checkout time passed; housekeeping must clear it first.
 
-## Why one lock for the whole location, not one per size? {#lld10-one-lock}
-A location has about 100 lockers and a handful of agents, and each deposit holds the lock for microseconds. A per-size lock adds deadlock risk for no real gain.
-**Why:** split it only if profiling shows contention.
-**Also:** lockers `OUT_OF_SERVICE` are never assigned, because the strategy filters on `is_available()`.
+## Amazon Locker: why one lock for the whole location, not one per locker size? {#lld10-one-lock}
+A location has about 100 lockers and a handful of agents, and each deposit holds the lock for microseconds, so one lock never contends.
+**Why:** a fallback deposit may look at several sizes, so per-size locks mean holding several at once and risking deadlock. Split only if profiling shows contention.
+**Example:** a single kirana shop needs one cash counter, not one per aisle.
 
-## 30-second pitch: Amazon Locker LLD {#lld10-pitch}
-`LockerLocation` owns lockers of three sizes. `SmallestFitStrategy` picks the smallest free locker that fits; the status moves through a transition table (not State classes). A `Reservation` holds a `secrets` 6-digit code, deposit time and wrong-attempt count; a `Notifier` tells the customer. Pickup allows 3 tries. A scheduler calls `expire_overdue()` with an injected clock. Find-and-occupy runs under one lock.
+## Give the Amazon Locker design as four beats. {#lld10-pitch}
+1. `LockerLocation` owns lockers of three sizes; `SmallestFitStrategy` picks the smallest free locker that fits.
+2. Locker status is an enum plus a transition table; find-and-occupy runs under one lock.
+3. A `Reservation` holds a `secrets` 6-digit code, deposit time and wrong-attempt count; pickup allows 3 tries.
+4. Notifiers tell the customer; a scheduler calls `expire_overdue()`, tested with an injected clock.
+
+Grade Got it only if you said all four beats.

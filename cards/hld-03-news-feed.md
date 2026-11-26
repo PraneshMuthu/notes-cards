@@ -3,104 +3,154 @@ topic: HLD 03 · News Feed
 group: HLD
 ---
 
-## Pitch the news feed in 30 seconds. {#hld03-pitch}
-Hybrid fanout (copying one post to many followers' lists): push each post into followers' Redis timelines (lists of post IDs) by default; accounts above ~1M followers are not pushed and are merged in at read time. Posts live in Cassandra, bodies in a write-through Redis post cache, and a 2 s in-process cache of celebrity lists protects Redis. Timelines are a rebuildable cache.
-**Why:** pure push dies on one 100M-follower post; pure pull costs ~30x more.
+## Pitch the news feed design in 30 seconds: say the 4 beats. {#hld03-pitch}
+(1) Push each post into followers' Redis timelines by default. (2) Accounts over ~1M followers are not pushed; merge them in at read time. (3) Posts in Cassandra, bodies in a write-through Redis cache. (4) Timelines are a rebuildable cache.
+**Why:** pure push dies on one 100M-follower post; pure pull costs ~30× more work. The hybrid (mix of both) is the only option left standing.
+**Example:** a newspaper delivers to every subscriber's door, but for the 5 celebrity columnists you pick up their page at the kiosk when you open the paper.
+**Trap:** grade Got it only if you said all 4 beats.
 
-## What numbers define the news feed problem? {#hld03-spec}
-200M DAU (daily active users), 100M posts/day, 10 timeline opens/user/day, peak 3x. Follows: median 200 (max 50k). Followers: median 100, p99 10k, max 100M; ~1,000 accounts over 1M, ~15% daily active. Staleness ~5 s (30 s at peak), your own post immediate. p99 <= 100 ms. Reverse-chron.
-**Permission questions that bought simplicity:** a timeline may be a capped sample and is rebuildable from posts (so a cache, no backups); no back-catalogue on follow; deletes filtered at read time.
-**Trap:** availability and "celebrities per user" were never asked.
+## News feed: which three "may I…?" questions to the interviewer made the design simpler? {#hld03-spec}
+(1) May a timeline be a capped, rebuildable copy? (2) May a new follow skip old posts? (3) May deletes be filtered at read time?
+**Why:** each "yes" deletes a subsystem: no timeline backups, no backfill job, no un-fanout (removing one post from 100M lists). Asking is cheaper than building.
+**Example:** asking a caterer "can the menu be fixed?" before you price a 500-guest buffet.
 
-## Push vs pull: what is the load and amplification, and who wins? {#hld03-push-vs-pull}
-Load: opens 200M x 10 / 86,400 = 23k QPS (x3 = 70k peak); posts 1,200 (3,500 peak); ratio ~20:1. Push: read 1, write N (followers). Pull: read M (follows), write 1. At the median: push 23k + 1,200 x 100 = ~145k ops/s; pull 23k x 200 = ~4.6M ops/s.
-**Why:** pull is ~30x more work: you pay M on the frequent side instead of N on the rare side.
-**Trap:** 100 is a floor; power-law accounts post more, so push costs more.
+## News feed: from 200M DAU, 10 opens/day and 100M posts/day, derive peak read and write rate. {#hld03-spec-load}
+Reads ≈ 23k/s, ~70k/s at 3× peak. Writes ≈ 1,200/s, ~3,500/s at peak. Read:write ≈ 20:1.
+**Why:** DAU (daily active users) × opens ÷ 86,400 s gives the average; peak is ~3×. The 20:1 ratio is what makes "do the work at write time" (push) attractive.
+**Example:** 200M × 10 = 2B opens/day ÷ ~10⁵ s ≈ 23k/s; 100M posts ÷ 10⁵ ≈ 1,200/s.
 
-## Why does a timeline open cost 1 + 50 and not 1? {#hld03-hydration}
-The timeline stores post IDs, so 50 bodies must be fetched with one MGET (multi-get) from the post cache. That second amplification makes hydration 70k x 50 = 3.5M ops/s, the biggest fleet (~55 Redis nodes).
-**Why IDs:** storing bodies in every timeline multiplies storage by fan-out and breaks delete and edit.
+## News feed: 23k opens/s, 1,200 posts/s, median 100 followers, median 200 follows. Push or pull, by how much? {#hld03-push-vs-pull}
+Push, by ~30×: push ≈ 145k ops/s, pull ≈ 4.6M ops/s.
+**Why:** push (copy each post into every follower's list) pays N followers on the rare side, writes. Pull (gather from everyone you follow at read time) pays M follows on the frequent side, reads.
+**Example:** push = 23k reads + 1,200 × 100 writes ≈ 145k; pull = 23k × 200 = 4.6M.
+**Trap:** 100 followers is a floor; big accounts post more often, so real push cost is higher.
 
-## Why does pure push fail, and what does the average hide? {#hld03-skew}
-One 100M-follower post = 15M writes (15% active). To land in 5 s you need 3M ops/s. Spare capacity: 25 nodes x 100k = 2.5M, x 65% target = 1.6M, minus 0.42M normal traffic = ~1.2M. Short by ~2.5x.
-**Why:** celebrities add only ~20% to daily fanout (26k/s vs 116k/s), so averages hide it. Skew is a burst problem: indivisible and deadline-bound.
+## News feed: timelines hold only post IDs. What extra work does every open do, and how big is it at 70k opens/s? {#hld03-hydration}
+One MGET (fetch many keys in one call) of 50 post bodies from the post cache: 70k × 50 = 3.5M ops/s, the largest Redis fleet (~55 nodes).
+**Why:** a list of IDs is useless until "hydrated" (each ID swapped for its post body), so every page read multiplies by page size.
+**Example:** a library catalogue gives you 50 shelf numbers; you still have to walk to the shelves to get the books.
 
-## How do you derive the celebrity threshold T? {#hld03-threshold}
-Ceiling: 5% of 1.2M spare = 60k ops/s x 4 s (5 s minus 1 s queue lag) = 240k writes / 0.15 active = T <= ~1.6M. Floor: T >= ~500k keeps the pulled set small. Chose T = 1M: 150k writes / 4 s = 37,500 ops/s = 3.1% of spare.
-**Why:** the 5% is a policy knob. T is runtime config, not a constant.
-**Trap:** "~10 celebrities per user" is an assumption.
+## News feed: why not store the full post body inside every follower's timeline? {#hld03-ids-not-bodies}
+Because fanout would copy the body N times, and an edit or delete would have to touch every copy.
+**Why:** an 8-byte ID per follower is cheap to copy; a ~350 B body × 100M followers is not. One shared body means one place to edit or delete.
+**Example:** a WhatsApp group forwards a link to a Google Doc, not 200 copies of the document; fix the doc once and everyone sees it.
 
-## Walk through the post write path. {#hld03-write-path}
-1. Write Cassandra (durable, ~10 ms).
-2. SET the body in the post cache (write-through).
-3. LPUSH (push to the head of a list) to the author's own timeline.
-4. Enqueue one fanout job.
-5. Return 201 (~14 ms).
-Async worker: if followers < T, LPUSH to each and LTRIM (cut) to 500; else nothing.
-**Why:** a near-T post (150k writes, ~4 s) cannot run in a request. The queue makes a threshold possible.
+## News feed: a 100M-follower account posts. Can pure push land it in every timeline within 5 s? {#hld03-skew}
+No. 15M writes (15% of followers active) in 5 s need 3M ops/s; the Redis fleet has only ~1.2M ops/s spare. Short by ~2.5×.
+**Why:** the burst is one indivisible job with a deadline. On a daily average celebrities add only ~20% to fanout, so averages hide the problem.
+**Example:** spare = 25 nodes × 100k ops/s = 2.5M raw, × 65% safe utilisation ≈ 1.6M, − 0.42M normal traffic ≈ 1.2M.
 
-## Which queue, and how is the 5 s staleness budget split? {#hld03-queue}
-The queue carries one message per post: 3,500 msg/s. So SQS is enough; Kafka's only edge is replay (rebuilding timelines). Budget: ~2 ms enqueue + 1 s queue lag + 4 s fanout execution. Alarm on queue lag, not enqueue rate.
-**Why:** delivery is at-least-once, so a post can land twice; dedup in the read merge (free). Order does not matter because Snowflake IDs (time-prefixed unique IDs) sort by time.
+## News feed: how do you derive the celebrity threshold T instead of guessing "1 million"? {#hld03-threshold}
+T ≤ (fanout budget ops/s × seconds allowed) ÷ active fraction = 60k × 4 ÷ 0.15 ≈ 1.6M. Pick T = 1M, below that ceiling.
+**Why:** a pushed post must land inside the staleness deadline without starving normal traffic. 60k = 5% of the 1.2M spare (a policy knob); 4 s = 5 s minus ~1 s queue lag. T is runtime config, not a constant.
+**Example:** a lift rated 640 kg carries 8 people because 640 ÷ 80 = 8, not because 8 "feels right".
+**Trap:** there is also a floor (~500k): set T too low and every read must merge hundreds of pulled accounts.
 
-## Why is the post cache write-through? {#hld03-write-through}
-A new post is the most-read object in the system. Lazy loading makes the first wave of readers all miss on the same key at once: a thundering herd on one Cassandra partition.
-**Why:** one SET on a 3,500 QPS path removes the failure mode.
-**Example:** a shop opening a hot product with an empty shelf, while thousands queue at the storeroom door.
+## News feed: walk through what happens when someone posts. Say the 4 beats. {#hld03-write-path}
+(1) Write the post to Cassandra (durable). (2) SET the body in the post cache. (3) LPUSH (add to list head) the ID into the author's own timeline. (4) Enqueue one fanout job, return 201 in ~14 ms.
+**Why:** a 150k-follower fanout takes seconds, so it cannot run inside the request. The queue lets the worker push to followers if they are under T, and skip celebrities.
+**Example:** a restaurant takes your order and gives a token at once; the kitchen cooks after you have sat down.
+**Trap:** grade Got it only if you said all 4 beats.
 
-## Walk through the timeline read path. {#hld03-read-path}
-1. LRANGE (read a slice of a list) own timeline, 60 IDs (over-fetch).
-2. LRANGE ~10 celebrity lists.
-3. Merge by Snowflake ID, take the top 50 (local).
-4. MGET 50 bodies.
-5. Drop deleted ones.
-About 12 round trips, ~16 ms p99 against a 100 ms budget.
-**Why:** 12, not 200, because only the exempt tail is pulled. Latency eliminates nothing here; skew does.
+## News feed: the fanout queue carries one message per post, ~3,500/s at peak. SQS or Kafka? {#hld03-queue}
+Either works; SQS is enough. Kafka's only extra is replay (re-reading old messages), useful if you ever rebuild timelines from the log.
+**Why:** 3,500 msg/s is tiny for both. Pick by features, not throughput: the queue holds one job per post, not one per follower.
+**Example:** a post with 1M followers is still 1 message; the worker turns it into 150k Redis writes.
 
-## How do read-your-writes, follow, and delete work? {#hld03-frs}
-- Own post: synchronous LPUSH into your own timeline before returning; the queue handles everyone else.
-- Follow: nothing for push; pull backfills automatically.
-- Delete: delete in Cassandra only. Hydration returns empty and is dropped, so fetch 60 to return 50.
-**Why:** never un-fan-out 100M lists.
+## News feed: how do you split the 5 s staleness budget, and which metric do you alarm on? {#hld03-staleness-budget}
+~1 s for the job to wait in the queue, ~4 s for the worker to fan it out. Alarm on queue lag (age of the oldest waiting job).
+**Why:** staleness (delay before followers see a post) is lag plus execution time. Enqueue rate can look normal while workers fall behind; lag shows the user-visible delay directly.
+**Example:** at a ration shop the queue length matters less than "how long has the person at the back been waiting?".
 
-## What is the hybrid's hidden cost, and the fix? {#hld03-celebrity-reads}
-It moves the hot key from write to read. 70k opens/s x ~10 celebrity lists = 700k ops/s, 10x the planned read load, and the threshold's ceiling collapses to ~667k.
-**Fix:** a 2 s in-process cache of the ~1,000 celebrity lists on each app box: 70 boxes x 1,000 keys / 2 s = 35k ops/s (20x cut), ~480 KB per box.
-**Why:** it makes Redis load independent of request rate. A carve-out relocates load; price the side you moved it to.
+## News feed: why must the post cache be write-through, not filled on first miss? {#hld03-write-through}
+A new post is the most-read object for its first minutes. Filling on miss makes thousands of readers miss together and all hit one Cassandra partition.
+**Why:** write-through (SET the cache at post time) costs one write on a 3,500/s path and removes this stampede (many simultaneous misses on one key) entirely.
+**Example:** a shop launches a hot phone with an empty shelf, so thousands queue at the storeroom door at once.
 
-## Why lists, not sorted sets, for timelines? {#hld03-list-vs-zset}
-A sorted set makes redelivered fanout idempotent, but costs ~70 B/entry vs ~16 B (500 entries exceed the 128-entry listpack threshold, the compact encoding): 1.6 TB becomes ~7 TB, 25 nodes become ~110.
-**Why:** the timeline tier is RAM-bound, so it is the worst place to spend 4x. Dedup during the read merge instead, which is free.
+## News feed: walk through a timeline open. Say the 4 beats. {#hld03-read-path}
+(1) LRANGE (read a slice of a list) your timeline, 60 IDs. (2) LRANGE ~10 celebrity lists you follow. (3) Merge by ID, keep the top 50. (4) MGET the 50 bodies and drop deleted ones.
+**Why:** ~12 round trips (~16 ms at p99, the slowest 1%) against a 100 ms budget, because only the few celebrities are pulled, not all 200 follows.
+**Example:** a newspaper on your doorstep plus 10 columns picked up at the kiosk, sorted together by date.
+**Trap:** grade Got it only if you said all 4 beats.
 
-## Size the timeline Redis tier. {#hld03-timeline-size}
-200M DAU x 500 IDs x 16 B = 1.6 TB; at 64 GB/node that is 25 nodes by RAM, versus 420k ops/s / 100k = ~8 by ops.
-**Why:** it is RAM-bound, so sizing by ops under-provisions 3x. Knobs: shrink the cap (200 IDs = 640 GB) or materialise only for recently active users (count DAU, not total users).
+## News feed: fanout is async (up to 5 s), yet your own post must appear instantly. How? {#hld03-frs}
+Before returning 201, synchronously LPUSH the post ID into the author's own timeline. The queue handles everyone else.
+**Why:** one extra Redis write (~1 ms) gives read-your-writes (you always see your own changes) to the one person who checks immediately.
+**Example:** you post, refresh at once, and see it, while friends get it a few seconds later.
 
-## Why is the followers table bucketed, and why store the follow edge twice? {#hld03-followers-bucket}
-PK (partition key: which drawer) is `(followee_id, bucket)`; CK (clustering key: order of folders inside) is `follower_id`, which makes fanout resumable. A 100M-follower account would be ~5 GB in one partition (guidance ~100 MB): damage is compaction (background merging), repair and heap, not reads. Fix: `shard_count = ceil(followers / 100,000)`.
-**Twice:** `follows` and `followers` need different partition keys; drift means a missed fanout, not lost data.
+## News feed: a post whose ID sits in 100M timelines is deleted. How do you remove it? {#hld03-frs-delete}
+Don't touch the timelines. Delete the post row; at read time hydration finds no body and drops the ID. Over-fetch 60 IDs to still return 50.
+**Why:** un-fanning-out is up to 100M writes for a rare event. Filtering at read time costs a few spare IDs per page.
+**Example:** a library removes a book but leaves old catalogue cards; a missing book is simply skipped.
 
-## Why Cassandra for posts, and when would Postgres do? {#hld03-cassandra}
-Storage decides: 35 GB/day x RF 3 (3 copies) x 5 years is ~190 TB, ~130 nodes at 1.5 TB each, while throughput needs about 1 node. Postgres would have to be hand-sharded.
-**Why:** writes are append-only (LSM tree: write to memory, flush sorted files). At 10M posts/day (1.3 TB/yr), Postgres is right. "NoSQL because it scales" is not a reason.
+## News feed: you follow someone new. What work happens, and why is that enough? {#hld03-frs-follow}
+Nothing at follow time. Their future posts reach you by fanout, or by the read-time merge if they are a celebrity.
+**Why:** backfilling old posts is a burst of writes per follow for content the interviewer said nobody needs.
+**Example:** subscribing to a newspaper gets you tomorrow's edition, not last month's.
 
-## Ops and bytes disagreed at every tier. What bound each? {#hld03-binding}
-Timeline index: ops 8 nodes, RAM 25 (RAM-bound). Post cache: ops 55, RAM ~135 GB (op-bound). Cassandra: ops 1, storage 130 (storage-bound). Compute both, say which wins.
-**Why per-node sizes are recovery budgets:** Redis 60 s x 1.25 GB/s (10 Gbps NIC) = ~75 GB, rounded to 64 GB. Cassandra: re-streaming 1 TB / 200 MB/s = ~1.5 h, so ~1.5 TB/node.
+## News feed: celebrities are pulled at read time. What load does that move, and to where? {#hld03-celebrity-reads}
+It moves the hot key from writes to reads: 70k opens/s × ~10 celebrity lists = 700k Redis reads/s, 10× the planned read load.
+**Why:** a carve-out relocates load, it doesn't delete it. That extra read load eats the spare capacity, so the threshold's ceiling drops from ~1.6M to ~667k, below the T = 1M chosen.
+**Example:** closing a crowded front gate just moves the crowd to the side gate.
 
-## A timeline Redis node dies. What now? {#hld03-node-death}
-8M users' timelines vanish (1/25th). Rebuild lazily on miss using the pull path: read follows, fetch recent posts, merge, write back. ~2,800 misses/s x 200 fetches = 560k Cassandra reads/s, ratio 0.43.
-**Why not eager:** 1.6B reads is ~20 minutes of the whole Cassandra fleet. Recovery is code that already runs on every celebrity read.
+## News feed: 700k reads/s hit ~1,000 celebrity lists. What fix makes Redis load independent of traffic? {#hld03-celebrity-cache}
+A 2 s in-process cache (in the app server's own memory) of all ~1,000 celebrity lists on every app box.
+**Why:** load becomes boxes × keys ÷ TTL, not requests: 70 × 1,000 ÷ 2 s = 35k ops/s, a 20× cut, and still 35k at 10× traffic. 2 s is inside the 5 s staleness budget.
+**Example:** each office floor keeps today's newspaper on a table instead of every employee phoning the newsagent.
+**Trap:** replicating the hot keys across more Redis nodes spreads the 700k but still pays it.
 
-## What fanout work is done for nobody, and how do you cut it? {#hld03-inactive}
-With ~1B registered vs 200M DAU, ~80% of fanout writes are never read. Skip inactive followers with an `active_recently` flag or a bloom filter (seen in ~7 days): peak fanout 350k (3,500 posts/s x 100) falls to ~70k ops/s.
-**Why:** a lapsed user returning takes a miss and uses the lazy rebuild path. A false positive only wastes a write.
-**Trap:** apply the discount everywhere, not just to celebrities.
+## News feed: why are timelines Redis lists, not sorted sets? {#hld03-list-vs-zset}
+Lists cost ~16 B per entry vs ~70 B for a sorted set, and the timeline tier is RAM-bound: 1.6 TB would become ~7 TB (25 nodes → ~110).
+**Why:** a sorted set would make duplicate fanout deliveries harmless, but you can drop duplicates free during the read merge. Above 128 entries a sorted set leaves Redis's compact encoding, hence the 4×.
+**Example:** a queue at fanout redelivers post 981 twice; the merge sees 981, 981 and keeps one.
 
-## Cursor or offset pagination for a feed? {#hld03-pagination}
-Cursor: `GET /v1/timeline?cursor=<snowflake_id>&limit=50`, meaning everything older than this ID.
-**Why:** the feed changes under the reader. With `offset=50`, new posts shift everything down and page 2 repeats items. Snowflake IDs (time-prefixed unique IDs) are time-sortable, so the cursor is free (and ordering and merging are too).
+## News feed: from 200M DAU × 500 IDs × 16 B, size the timeline Redis tier. How many nodes? {#hld03-timeline-size}
+1.6 TB ÷ 64 GB per node = 25 nodes. Sized by ops (420k ÷ 100k) it would be only ~8, so provision 25: the tier is RAM-bound.
+**Why:** provisioning by the smaller number under-provisions the real limit 3×.
+**Example:** 200M × 500 × 16 B = 1.6 × 10¹² B = 1.6 TB.
+**Trap:** count DAU, not registered users; inactive users need no timeline in RAM.
 
-## What breaks first at 10x for the feed? {#hld03-10x}
-Not capacity: timelines (250 nodes), post cache (550), Cassandra (1,300) all scale linearly, and spare fanout capacity rises, so T can go up. Geography breaks first: a cross-region round trip (~100 ms) spends the whole budget.
-**Fix:** regional read replicas, writes homed to one region. Runner-up: cost. The first lever is the 500-entry cap.
+## News feed: timelines are RAM-bound. Can you size the post cache and Cassandra the same way? {#hld03-binding}
+No: each tier has its own binding constraint. Post cache is ops-bound (55 nodes, only ~135 GB); Cassandra is disk-bound (130 nodes for 3,500 writes/s).
+**Why:** a tier needs max(nodes by ops, nodes by RAM, nodes by disk). Compute all, provision the largest, and say which one binds.
+**Example:** a moving truck: 10 boxes fit by weight but only 6 by volume, so you need the bigger truck.
+
+## News feed: why cap a Redis node near 64 GB and a Cassandra node near 1.5 TB, even if bigger machines exist? {#hld03-binding-node-size}
+Node size is a recovery budget: a dead node must be rebuilt fast. 64 GB copies over 10 Gbps in ~1 min; 1.5 TB re-streams in ~2 h.
+**Why:** a bigger node means a longer window with one copy fewer after a failure. Cassandra re-streams at only ~200 MB/s, so its budget in bytes is larger but its window longer.
+**Example:** one giant warehouse burns down and takes a month to restock; ten small ones each take a few days.
+
+## News feed: one account has 100M followers. How do you store its follower list in Cassandra? {#hld03-followers-bucket}
+Split it into buckets: partition key `(followee_id, bucket)`, with `bucket_count = ceil(followers ÷ 100,000)`. Clustering key `follower_id`.
+**Why:** one partition (the rows stored together on one node) would be ~5 GB against ~100 MB guidance; it hurts compaction (background merge of files) and repair. Sorting by follower ID lets a crashed fanout resume from the last ID.
+**Example:** a phone book split into volumes A–F, G–M… instead of one 50 kg book.
+
+## News feed: why store each follow edge twice, in `follows` and in `followers`? {#hld03-follow-edge-twice}
+Cassandra looks rows up only by partition key: "who do I follow?" needs user as the key, "who follows me?" needs followee as the key.
+**Why:** a table can be partitioned one way. Dual-write both; if they drift, the cost is a missed fanout (one post not pushed), not lost data.
+**Example:** a school keeps a register per class and a timetable per teacher: the same facts, filed by two keys.
+
+## News feed: 100M posts/day × 350 B. Cassandra or Postgres for posts? {#hld03-cassandra}
+Cassandra: storage decides. 35 GB/day × 3 copies × 5 years ≈ 190 TB ≈ 130 nodes, while 3,500 writes/s need about one.
+**Why:** Postgres would have to be hand-sharded across 100+ machines. Cassandra spreads data by key and handles append-only writes well (LSM tree: buffer in memory, flush sorted files).
+**Example:** at 10M posts/day (~1.3 TB/year) one Postgres box is fine; "NoSQL because it scales" is not a reason.
+
+## News feed: a timeline Redis node dies and its replica is lost too. How do you rebuild 8M timelines? {#hld03-node-death}
+Lazily, on each user's next open, using the pull path: read their follows, fetch recent posts, merge, write back.
+**Why:** an eager rebuild is 1.6B Cassandra reads, ~20 min of the whole fleet. Lazy is ~2,800 misses/s × 200 = 560k reads/s, under half of Cassandra's capacity.
+**Example:** after a power cut a shop restocks each shelf when the first customer asks, not the whole store overnight.
+
+## News feed: with ~1B registered users but 200M daily active, what fanout work is wasted, and how do you cut it? {#hld03-inactive}
+~80% of fanout writes go to people who won't open the app. Skip followers unseen for ~7 days: peak fanout falls 350k → ~70k ops/s.
+**Why:** a flag or Bloom filter (compact "seen recently?" set) answers per follower. A returning user just misses and takes the lazy-rebuild path, which already exists. A wrong "active" answer only wastes one write.
+**Example:** a newspaper stops delivering to a house that hasn't taken in its paper for a week; restart when they call.
+
+## News feed: new posts keep arriving while you scroll. Cursor or offset pagination, and why? {#hld03-pagination}
+Cursor: `GET /timeline?cursor=<last_post_id>&limit=50` returns posts older than that ID.
+**Why:** the feed changes under the reader. With `offset=50`, new posts push everything down and page 2 repeats items. Post IDs are Snowflake (time-ordered), so "older than this ID" is "older than this time".
+**Example:** 3 new posts arrive while you read page 1; offset 50 now starts at your old item 48, showing 3 repeats.
+
+## News feed at 10× (2B users): what breaks first? {#hld03-10x}
+Geography, not capacity. Users are global and a cross-region round trip (~100 ms) spends the whole latency budget. Fix: regional read copies, writes homed to one region.
+**Why:** every tier scales by adding nodes (timelines 250, post cache 550, Cassandra 1,300), and spare fanout grows too, so T can even rise.
+**Example:** a Mumbai user reading from a US-only cluster waits ~200 ms before any work starts.
