@@ -40,6 +40,7 @@ button { cursor: pointer; }
 .front { font-size: 22px; font-weight: 600; line-height: 1.35; }
 .front p, .back p { margin: 0; }
 .hint { margin-top: 28px; text-align: center; color: var(--muted); font-size: 15px; }
+.type-btn + .hint { margin-top: 12px; }
 .back { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .back p, .back ul, .back ol, .back pre, .back table, .back details { margin: 0 0 12px; }
 .back ul, .back ol { padding-left: 22px; }
@@ -83,4 +84,13 @@ summary { cursor: pointer; color: var(--accent); }
 #newPerDay { width: 100px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
 .row { display: flex; gap: 8px; }
 .row button { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); }
+.type-btn { display: block; margin: 22px auto 0; background: none; border: 1px dashed var(--line); border-radius: 999px; padding: 6px 14px; font-size: 14px; color: var(--muted); touch-action: manipulation; }
+.mine { display: block; width: 100%; margin-top: 20px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); font-size: 16px; resize: vertical; }
+.yours { margin-top: 18px; padding: 10px 12px; border-left: 3px solid var(--g4); background: var(--code); border-radius: 6px; }
+.yours-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.yours-text { white-space: pre-wrap; font-size: 16px; }
+.leeches { margin: 0 0 8px; padding-left: 20px; font-size: 15px; }
+.leeches li { margin-bottom: 6px; }
+.leeches code { font-size: 12px; }
+#leechHead[hidden], #leeches[hidden] { display: none; }
 #msg { min-height: 1.5em; font-size: 15px; color: var(--muted); }

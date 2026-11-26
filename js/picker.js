@@ -2,6 +2,9 @@ import { dayKey } from './day.js';
 import { queueOf, retrievability } from './scheduler.js';
 
 const HALF_DAY = 12 * 60 * 60 * 1000;
+/** Forgotten this many times after being learned (Anki's default): the card itself needs rewriting. */
+export const LEECH_LAPSES = 8;
+export const isLeech = (state) => (state?.lapses ?? 0) >= LEECH_LAPSES;
 
 /** Cap minus distinct cards whose first review is today (4 AM cutoff) and not endless (`x`). */
 export function newLeftToday(reviews, cards, now, newPerDay) {
@@ -59,6 +62,7 @@ const dayLabel = (t, now) => {
  */
 export function cardStatus(state, reviews, now, mode = 'live') {
   if (!state || !reviews.length) return { kind: 'new', label: 'New' };
+  if (isLeech(state)) return { kind: 'forgot', label: `Leech · forgotten ${state.lapses}× · rewrite or split this card` };
   const last = reviews.reduce((a, b) => (b.t >= a.t ? b : a));
   const q = queueOf(state, now);
   if (isForgotten(q, last.g)) return { kind: 'forgot', label: `Forgot last time · ${dayLabel(last.t, now)}` };

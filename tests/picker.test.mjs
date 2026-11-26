@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFsrs, replay, effective } from '../js/scheduler.js';
-import { pickNext, newLeftToday, counts, progress, cardStatus } from '../js/picker.js';
+import { pickNext, newLeftToday, counts, progress, cardStatus, isLeech, LEECH_LAPSES } from '../js/picker.js';
 
 const f = makeFsrs({ fuzz: false });
 const now = new Date(2026, 2, 10, 12, 0, 0);
@@ -336,4 +336,25 @@ test('cardStatus: new, learning, forgot, review labels', () => {
   const st = states([card('a')], rev).get('a');
   assert.deepEqual(cardStatus(st, rev, now), { kind: 'review', label: 'Review · 4th time · last seen 4 Mar' });
   assert.deepEqual(cardStatus(st, rev, now, 'past'), { kind: 'review', label: 'Review · seen 3× · last seen 4 Mar' });
+});
+
+test('leech: a learned card forgotten LEECH_LAPSES times is flagged', () => {
+  const entries = [];
+  let t = ago(400 * DAY);
+  entries.push({ c: 'k', g: 3, t, d: '' }, { c: 'k', g: 3, t: t + 10 * MIN, d: '' });
+  for (let i = 0; i < LEECH_LAPSES; i++) {
+    t += 30 * DAY;
+    entries.push({ c: 'k', g: 1, t, d: '' }, { c: 'k', g: 3, t: t + 10 * MIN, d: '' }, { c: 'k', g: 3, t: t + DAY, d: '' });
+    if (i === LEECH_LAPSES - 2) {
+      const st = states([card('k', 'G', 'A')], entries).get('k');
+      assert.equal(isLeech(st), false);
+    }
+  }
+  const st = states([card('k', 'G', 'A')], entries).get('k');
+  assert.equal(st.lapses, LEECH_LAPSES);
+  assert.equal(isLeech(st), true);
+  const s2 = cardStatus(st, entries, now);
+  assert.equal(s2.kind, 'forgot');
+  assert.match(s2.label, /Leech/);
+  assert.equal(isLeech(undefined), false);
 });

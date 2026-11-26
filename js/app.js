@@ -3,7 +3,7 @@ import { parseCardFile } from './parse.js';
 import { renderMarkdown } from './markdown.js';
 import { createStore } from './store.js';
 import { makeFsrs, replay, effective } from './scheduler.js';
-import { pickNext, counts, progress, cardStatus, newLeftToday } from './picker.js';
+import { pickNext, counts, progress, cardStatus, newLeftToday, isLeech } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -117,12 +117,27 @@ function renderLive() {
     }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.'));
   } else {
     box = cardEl(pick.card, 'live', newLabel(pick.queue));
-    box.append(el('div', 'hint', 'tap to reveal'));
+    box.append(...attemptEls());
   }
   $('round').textContent = pick ? `${pick.round.pos} / ${pick.round.total}` : '';
   $('stage').replaceChildren(box);
   updateNav();
   updateCounts();
+}
+
+// Answer before looking: a nudge to say it out loud, and an optional box to type it.
+function attemptEls() {
+  const typeBtn = el('button', 'type-btn', '✎ Type my answer');
+  typeBtn.type = 'button';
+  typeBtn.onclick = (e) => {
+    e.stopPropagation();
+    const box = el('textarea', 'mine');
+    box.placeholder = 'Your answer, before you look';
+    box.rows = 4;
+    typeBtn.replaceWith(box);
+    box.focus();
+  };
+  return [typeBtn, el('div', 'hint', 'Say your answer out loud first, then tap to check')];
 }
 
 // Today's new cards are numbered against the daily limit; ones past it are extras.
@@ -146,7 +161,7 @@ function renderPast(i) {
   if (!card) { renderLive(); return; }
   if (h.skip) { // never graded: same as a fresh card — question first, then the grade buttons
     const box = cardEl(card, 'live');
-    box.append(el('div', 'hint', 'tap to reveal'));
+    box.append(...attemptEls());
     $('stage').replaceChildren(box);
     updateNav();
     return;
@@ -211,7 +226,19 @@ function reveal() {
   revealedAt = performance.now();
   const b = el('div', 'back');
   b.innerHTML = renderMarkdown(cur.card.back);
-  $('stage').firstChild.querySelector('.hint').replaceWith(b);
+  const cardBox = $('stage').firstChild;
+  cardBox.querySelector('.type-btn')?.remove();
+  const mine = cardBox.querySelector('.mine');
+  if (mine) {
+    const text = mine.value.trim();
+    if (text) { // keep what they wrote, read-only, right above the real answer to compare
+      const yours = el('div', 'yours');
+      yours.append(el('div', 'yours-label', 'Your answer'), el('div', 'yours-text', text));
+      mine.replaceWith(yours);
+    } else mine.remove();
+    document.activeElement?.blur();
+  }
+  cardBox.querySelector('.hint').replaceWith(b);
   $('grades').hidden = false;
 }
 
@@ -319,6 +346,13 @@ function wireMenu() {
       const p = progress(cards, states);
       $('seen').textContent = `Seen ${p.seen} of ${p.total} cards`;
       $('seenGroups').textContent = p.groups.map((g) => `${g.group} ${g.seen}/${g.total}`).join(' · ');
+      const leeches = cards.filter((c) => isLeech(states.get(c.id)));
+      $('leechHead').hidden = $('leeches').hidden = !leeches.length;
+      $('leeches').replaceChildren(...leeches.map((c) => {
+        const li = el('li', '', `${c.topic}: `);
+        li.append(el('span', 'leech-q', c.front.replace(/\s+/g, ' ').slice(0, 140)), el('code', '', ` #${c.id}`));
+        return li;
+      }));
     }
     $('menu').hidden = !on;
   };
@@ -392,7 +426,7 @@ async function loadDeck() {
 
 document.addEventListener('keydown', (e) => {
   if (!$('menu').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (e.target.closest?.('button, input, select, label, summary, a')) return;
+  if (e.target.closest?.('button, input, textarea, select, label, summary, a')) return;
   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
   else if ('1234'.includes(e.key)) { if (backIdx === null || history[backIdx]?.skip) grade(Number(e.key)); else changeGrade(backIdx, Number(e.key)); }
   else if (e.key === 's' || e.key === 'ArrowRight') next();
@@ -400,7 +434,7 @@ document.addEventListener('keydown', (e) => {
 });
 $('backBtn').onclick = () => { back(); document.activeElement?.blur(); };
 $('nextBtn').onclick = () => { next(); document.activeElement?.blur(); };
-$('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a')) reveal(); });
+$('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a, textarea, button')) reveal(); });
 for (const b of document.querySelectorAll('#grades button')) b.onclick = () => grade(Number(b.dataset.g));
 
 function installHint() {
