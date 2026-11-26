@@ -129,13 +129,19 @@ function renderPast(i) {
   const h = history[i];
   const card = cards.find((c) => c.id === h.id);
   if (!card) { renderLive(); return; }
+  if (h.skip) { // never graded: same as a fresh card — question first, then the grade buttons
+    const box = cardEl(card, 'live');
+    box.append(el('div', 'hint', 'tap to reveal'));
+    $('stage').replaceChildren(box);
+    updateNav();
+    return;
+  }
   const box = cardEl(card, 'past');
   const back = el('div', 'back');
   back.innerHTML = renderMarkdown(card.back);
   box.append(back);
   const row = el('div', 'regrade');
-  if (h.skip) row.append(el('span', '', 'You skipped this card.'));
-  else {
+  {
     // Only the card's latest grade can be changed (a later review would already have built on it).
     const latest = reviews().filter((r) => r.c === h.id).reduce((a, b) => (!a || b.t >= a.t ? b : a), null);
     const editable = latest && latest.t === h.t && latest.d === store.deviceId;
@@ -175,25 +181,43 @@ function changeGrade(i, g) {
   updateCounts();
 }
 
+// The card on screen that can be revealed and graded: the live pick, or a skipped card looked back at.
+function gradeable() {
+  if (backIdx === null) return pick ? { card: pick.card, endless: pick.endless } : null;
+  const h = history[backIdx];
+  const card = h?.skip && cards.find((c) => c.id === h.id);
+  return card ? { card, endless: !!h.x, histIdx: backIdx } : null;
+}
+
 function reveal() {
-  if (backIdx !== null || !pick || revealed || performance.now() - gradedAt < TAP_GUARD) return;
+  const cur = gradeable();
+  if (!cur || revealed || performance.now() - gradedAt < TAP_GUARD) return;
   revealed = true;
   revealedAt = performance.now();
   const b = el('div', 'back');
-  b.innerHTML = renderMarkdown(pick.card.back);
+  b.innerHTML = renderMarkdown(cur.card.back);
   $('stage').firstChild.querySelector('.hint').replaceWith(b);
   $('grades').hidden = false;
 }
 
 function grade(g) {
-  if (backIdx !== null || !pick || !revealed || performance.now() - revealedAt < TAP_GUARD) return;
+  const cur = gradeable();
+  if (!cur || !revealed || performance.now() - revealedAt < TAP_GUARD) return;
   revealed = false; // guards against double taps
   gradedAt = performance.now();
-  const { card, endless } = pick;
+  const { card, endless } = cur;
   const now = new Date();
   store.add({ c: card.id, g, t: now.getTime(), d: store.deviceId, ...(endless && { x: true }) });
   states.set(card.id, fsrs.next(states.get(card.id) ?? createEmptyCard(now), now, g).card);
-  history.push({ id: card.id, at: now.getTime(), t: now.getTime(), g, ...(endless && { x: true }) });
+  const entry = { id: card.id, at: now.getTime(), t: now.getTime(), g, ...(endless && { x: true }) };
+  if (cur.histIdx !== undefined) { // graded a card that was skipped earlier: record it there, then move on
+    history[cur.histIdx] = entry;
+    if (endless) session.endlessCount++;
+    document.activeElement?.blur();
+    next();
+    return;
+  }
+  history.push(entry);
   session.lastGroup = ui.lastGroup = card.group;
   saveUi();
   if (endless) session.endlessCount++;
@@ -206,7 +230,7 @@ function grade(g) {
 function skip() {
   if (!pick || performance.now() - gradedAt < TAP_GUARD) return;
   gradedAt = performance.now();
-  history.push({ id: pick.card.id, at: Date.now(), skip: true });
+  history.push({ id: pick.card.id, at: Date.now(), skip: true, ...(pick.endless && { x: true }) });
   session.lastGroup = pick.card.group;
   document.activeElement?.blur();
   showNext();
@@ -354,7 +378,7 @@ document.addEventListener('keydown', (e) => {
   if (!$('menu').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.target.closest?.('button, input, select, label, summary, a')) return;
   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
-  else if ('1234'.includes(e.key)) { if (backIdx === null) grade(Number(e.key)); else changeGrade(backIdx, Number(e.key)); }
+  else if ('1234'.includes(e.key)) { if (backIdx === null || history[backIdx]?.skip) grade(Number(e.key)); else changeGrade(backIdx, Number(e.key)); }
   else if (e.key === 's' || e.key === 'ArrowRight') next();
   else if (e.key === 'ArrowLeft') back();
 });
