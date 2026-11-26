@@ -93,4 +93,6 @@ summary { cursor: pointer; color: var(--accent); }
 .leeches li { margin-bottom: 6px; }
 .leeches code { font-size: 12px; }
 #leechHead[hidden], #leeches[hidden] { display: none; }
-#msg { min-height: 1.5em; font-size: 15px; color: var(--muted); }
+#msg, #syncMsg { min-height: 1.5em; font-size: 15px; color: var(--muted); }
+.sync-help { margin: 0 0 8px; font-size: 14px; color: var(--muted); }
+.field { display: block; width: 100%; margin-bottom: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 16px; }

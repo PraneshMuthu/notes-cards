@@ -104,21 +104,26 @@ export function createStore(storage) {
       if (bad.length) out.corruptBackups = bad; // optional; importJson ignores it
       return JSON.stringify(out);
     },
+    /** Union in entries from elsewhere (sync); invalid ones are skipped. Returns how many were new. */
+    mergeIn(list) {
+      if (!Array.isArray(list)) return 0;
+      const seen = new Set(log.map(key));
+      let added = 0;
+      for (const r of list) {
+        if (!validReview(r) || seen.has(key(r))) continue;
+        seen.add(key(r));
+        log.push(normalize(r));
+        added++;
+      }
+      if (added) { log.sort((x, y) => x.t - y.t); persist(); }
+      return added;
+    },
     importJson(text) {
       let data;
       try { data = JSON.parse(text); } catch { throw new Error('Not a notes-cards export'); }
       if (!data || data.app !== 'notes-cards' || data.version !== 1 || !Array.isArray(data.reviews) ||
           !data.reviews.every(validReview)) throw new Error('Not a notes-cards export');
-      const seen = new Set(log.map(key));
-      let added = 0;
-      for (const r of data.reviews) {
-        if (seen.has(key(r))) continue;
-        seen.add(key(r));
-        log.push(normalize(r));
-        added++;
-      }
-      if (added) persist();
-      return { added };
+      return { added: this.mergeIn(data.reviews) };
     },
   };
 }

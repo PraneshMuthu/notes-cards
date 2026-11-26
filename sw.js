@@ -4,7 +4,7 @@ const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest', './icon.svg',
   './apple-touch-icon.png', './icon-192.png', './icon-512.png',
   './js/app.js', './js/parse.js', './js/markdown.js', './js/day.js', './js/scheduler.js',
-  './js/store.js', './js/picker.js', './vendor/ts-fsrs.mjs',
+  './js/store.js', './js/picker.js', './js/sync.js', './vendor/ts-fsrs.mjs',
 ];
 
 self.addEventListener('install', (e) => {

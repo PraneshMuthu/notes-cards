@@ -57,6 +57,12 @@
     <div class="row"><button id="exportBtn">Export</button><button id="importBtn">Import</button></div>
     <input id="importFile" type="file" accept="application/json,.json" hidden>
     <p id="msg" role="status"></p>
+    <h3>Sync between devices</h3>
+    <p class="sync-help">A private GitHub repo holds your progress. Use the same repo and token on each device.</p>
+    <input id="syncRepo" class="field" placeholder="owner/repo" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input id="syncToken" class="field" type="password" placeholder="Fine-grained token (github_pat_…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="row"><button id="syncSave">Save &amp; sync</button><button id="syncNow">Sync now</button></div>
+    <p id="syncMsg" role="status"></p>
   </div>
 </div>
 <script type="module" src="./js/app.js"></script>

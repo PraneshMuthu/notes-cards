@@ -5,6 +5,7 @@ import { createStore } from './store.js';
 import { makeFsrs, replay, effective } from './scheduler.js';
 import { pickNext, counts, progress, cardStatus, todaysNew, isLeech } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
+import { createSync, SYNC_KEY, parseRepo } from './sync.js';
 
 const $ = (id) => document.getElementById(id);
 const UI_KEY = 'nc:v1:ui';
@@ -27,6 +28,9 @@ let backupSnoozed = false;
 let backIdx = null; // index into history while looking back at earlier cards; null = the live card
 const GRADE_NAMES = ['', 'Forgot', 'Hard', 'Got it', 'Easy'];
 const reviews = () => effective(store.reviews()); // without grades that were later changed
+const DEFAULT_REPO = 'PraneshMuthu/notes-cards-progress';
+const SYNC_EVERY = 5; // grades between background syncs
+let sync, syncing = null, syncAgain = false, gradesSinceSync = 0;
 
 function banner(id, text, onDismiss) {
   let el = $(id);
@@ -207,6 +211,7 @@ function changeGrade(i, g) {
   if (!h || h.skip || g === h.g) return;
   store.add({ c: h.id, g, t: h.t + 1, d: store.deviceId, r: h.t, ...(h.x && { x: true }) });
   h.t += 1; h.g = g;
+  gradesSinceSync++;
   states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
   renderPast(i);
   updateCounts();
@@ -253,6 +258,7 @@ function grade(g) {
   const now = new Date();
   store.add({ c: card.id, g, t: now.getTime(), d: store.deviceId, ...(endless && { x: true }) });
   states.set(card.id, fsrs.next(states.get(card.id) ?? createEmptyCard(now), now, g).card);
+  if (++gradesSinceSync >= SYNC_EVERY) runSync();
   const entry = { id: card.id, at: now.getTime(), t: now.getTime(), g, ...(endless && { x: true }) };
   if (cur.histIdx !== undefined) { // graded a card that was skipped earlier: record it there, then move on
     history[cur.histIdx] = entry;
@@ -278,6 +284,89 @@ function skip() {
   session.lastGroup = pick.card.group;
   document.activeElement?.blur();
   showNext();
+}
+
+// ---- Sync (js/sync.js): pull other devices' reviews, push ours. Never blocks studying.
+const syncConf = () => safe(() => JSON.parse(localStorage.getItem(SYNC_KEY)), null) ?? {};
+const saveSyncConf = (c) => safe(() => localStorage.setItem(SYNC_KEY, JSON.stringify(c)));
+
+function ago(t) {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} h ago` : new Date(t).toLocaleDateString();
+}
+
+function syncStatus(text) {
+  const last = sync.lastSyncAt();
+  $('syncMsg').textContent = text ?? (!sync.configured() ? 'Off on this device.'
+    : last ? `Synced ${ago(last)}.` : 'Not synced yet.');
+}
+
+/** Returns { added, pushed } or null when off or failed. Concurrent calls share one run plus one rerun. */
+function runSync(opts) {
+  if (!sync?.configured()) return Promise.resolve(null);
+  if (syncing) { syncAgain = true; return syncing; }
+  syncing = (async () => {
+    try {
+      const r = await sync.sync(opts);
+      gradesSinceSync = 0;
+      banner('syncErr', '');
+      if (r.added) {
+        states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
+        // Another device may have just studied the card on screen: re-pick if it's untouched.
+        const typing = $('stage').querySelector('.mine')?.value;
+        if (backIdx === null && !revealed && !typing) showNext(); else updateCounts();
+      }
+      syncStatus();
+      return r;
+    } catch (err) {
+      syncStatus(err.message);
+      if (err.kind === 'auth' || err.kind === 'repo') banner('syncErr', `Sync stopped: ${err.message} Fix it in the menu ☰.`, true);
+      return null;
+    } finally {
+      syncing = null;
+      if (syncAgain) { syncAgain = false; runSync(); }
+    }
+  })();
+  return syncing;
+}
+
+function wireSync() {
+  const fill = () => {
+    const c = syncConf();
+    $('syncRepo').value = c.repo ?? DEFAULT_REPO;
+    $('syncToken').value = '';
+    $('syncToken').placeholder = c.token ? 'Token saved · paste a new one to replace' : 'Fine-grained token (github_pat_…)';
+    syncStatus();
+  };
+  $('menuBtn').addEventListener('click', fill);
+  $('syncSave').onclick = async () => {
+    const c = syncConf();
+    const repoText = $('syncRepo').value.trim();
+    if (!repoText) { // empty repo = turn sync off here; reviews stay on this device
+      saveSyncConf({});
+      fill(); syncStatus('Sync turned off on this device.');
+      return;
+    }
+    const repo = parseRepo(repoText);
+    if (!repo) { syncStatus('Repo should look like owner/name.'); return; }
+    const token = $('syncToken').value.trim() || c.token;
+    if (!token) { syncStatus('Paste the token first.'); return; }
+    const full = `${repo.owner}/${repo.repo}`;
+    const same = full === c.repo && token === c.token;
+    saveSyncConf(same ? c : { repo: full, token }); // new repo or token: forget what we knew about the files
+    fill(); syncStatus('Syncing…');
+    const r = await runSync();
+    if (r) syncStatus(`Synced. ${r.added} review${r.added === 1 ? '' : 's'} from other devices.`);
+  };
+  $('syncNow').onclick = async () => {
+    if (!sync.configured()) { syncStatus('Add the repo and token first.'); return; }
+    syncStatus('Syncing…');
+    const r = await runSync();
+    if (r) syncStatus(`Synced. ${r.added} review${r.added === 1 ? '' : 's'} from other devices.`);
+  };
 }
 
 function saveUi() { safe(() => localStorage.setItem(UI_KEY, JSON.stringify(ui))); }
@@ -400,6 +489,7 @@ function wireMenu() {
       states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
       msg(`Imported ${added} new review${added === 1 ? '' : 's'}.`);
       showNext();
+      if (added) runSync();
     } catch (err) { msg(err.message || 'Import failed.'); }
   };
 }
@@ -456,7 +546,9 @@ async function main() {
   try { navigator.storage?.persist?.()?.catch?.(() => {}); } catch { /* optional */ }
   loadUi();
   installHint();
+  sync = createSync({ fetch: (...a) => fetch(...a), store, load: syncConf, save: saveSyncConf });
   wireMenu();
+  wireSync();
   if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
     try { navigator.serviceWorker.register('./sw.js').catch(() => {}); } catch { /* optional */ }
   }
@@ -467,6 +559,8 @@ async function main() {
   states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
   buildMenu();
   showNext();
+  runSync();
+  window.addEventListener('online', () => runSync());
   // Another tab wrote reviews: merge them in so neither tab overwrites the other.
   window.addEventListener('storage', (e) => {
     if (e.key !== 'nc:v1:log') return;
@@ -475,7 +569,8 @@ async function main() {
     updateCounts();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState !== 'visible') { if (gradesSinceSync) runSync({ keepalive: true }); return; }
+    if (Date.now() - (sync.lastSyncAt() ?? 0) > 2 * 60000) runSync();
     if (backIdx === null && !revealed && Date.now() - pickedAt > 5 * 60000) showNext(); else updateCounts();
   });
 }
