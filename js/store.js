@@ -26,38 +26,65 @@ export function createStore(storage) {
 
   let blockLog = false; // never write LOG when true
   let recovered = false;
-  let log = [];
-  let raw = null;
-  if (storage) {
-    try { raw = storage.getItem(LOG); } catch { ok = false; blockLog = true; }
-  }
-  if (raw != null) {
-    let parsed;
-    let bad = false;
-    try { parsed = JSON.parse(raw); } catch { bad = true; }
-    if (!bad && !Array.isArray(parsed)) bad = true;
-    if (!bad) {
-      log = parsed.filter(validReview);
-      if (log.length !== parsed.length) bad = true;
-    }
-    if (bad) {
-      try { storage.setItem(`${LOG}:corrupt-${Date.now()}`, raw); recovered = true; }
-      catch { ok = false; blockLog = true; }
-    }
-  }
+  const backup = (raw) => {
+    try { storage.setItem(`${LOG}:corrupt-${Date.now()}`, raw); recovered = true; return true; }
+    catch { ok = false; blockLog = true; return false; }
+  };
+  // Valid entries currently in storage. Anything invalid is backed up raw first (and marks `dirty`).
+  let dirty = false;
+  const readLog = () => {
+    if (!storage) return [];
+    let raw;
+    try { raw = storage.getItem(LOG); } catch { ok = false; blockLog = true; return []; }
+    if (raw == null) return [];
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch { /* corrupt */ }
+    const list = Array.isArray(parsed) ? parsed.filter(validReview) : [];
+    if ((!Array.isArray(parsed) || list.length !== parsed.length) && backup(raw)) dirty = true;
+    return list;
+  };
+  // Union by key (c|t|d), sorted by time: the stored log only ever grows.
+  const merge = (a, b) => {
+    const m = new Map();
+    for (const r of [...a, ...b]) if (!m.has(key(r))) m.set(key(r), r);
+    return [...m.values()].sort((x, y) => x.t - y.t);
+  };
+  let log = readLog();
+  if (dirty && !blockLog) { write(LOG, JSON.stringify(log)); dirty = false; } // so the backup isn't remade every load
   let deviceId = read(DEVICE);
   if (!deviceId) { deviceId = crypto.randomUUID(); write(DEVICE, deviceId); }
   const stored = parse(read(SETTINGS), {});
   const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
   let cfg = { ...DEFAULT_SETTINGS, ...(isObj(stored) ? stored : {}) };
 
-  const persist = () => { if (!blockLog) write(LOG, JSON.stringify(log)); };
+  // Re-read before writing so another tab's entries are merged, not overwritten.
+  const persist = () => {
+    if (blockLog) return;
+    const disk = readLog();
+    if (blockLog) return;
+    log = merge(disk, log);
+    dirty = false;
+    write(LOG, JSON.stringify(log));
+  };
+  const corruptBackups = () => {
+    const out = [];
+    try {
+      if (!storage || typeof storage.key !== 'function') return out;
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (k && k.startsWith(`${LOG}:corrupt-`)) out.push({ key: k, raw: storage.getItem(k) });
+      }
+    } catch { /* export what we have */ }
+    return out.sort((a, b) => (a.key < b.key ? -1 : 1));
+  };
 
   return {
     get ok() { return ok; },
     deviceId,
     get recovered() { return recovered; },
     reviews: () => log.slice(),
+    /** Merge in entries another tab has written since we last read. */
+    reload() { log = merge(readLog(), log); if (dirty && !blockLog) persist(); },
     add(review) {
       if (!validReview(review)) throw new Error('Invalid review');
       const e = { c: review.c, g: review.g, t: review.t, d: review.d };
@@ -66,7 +93,12 @@ export function createStore(storage) {
     },
     settings: () => ({ ...cfg }),
     saveSettings(s) { cfg = { ...DEFAULT_SETTINGS, ...(isObj(s) ? s : {}) }; write(SETTINGS, JSON.stringify(cfg)); },
-    exportJson: () => JSON.stringify({ app: 'notes-cards', version: 1, reviews: log }),
+    exportJson() {
+      const out = { app: 'notes-cards', version: 1, reviews: log };
+      const bad = corruptBackups();
+      if (bad.length) out.corruptBackups = bad; // optional; importJson ignores it
+      return JSON.stringify(out);
+    },
     importJson(text) {
       let data;
       try { data = JSON.parse(text); } catch { throw new Error('Not a notes-cards export'); }

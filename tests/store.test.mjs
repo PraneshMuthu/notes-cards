@@ -92,8 +92,12 @@ const seeded = (log) => { const st = fakeStorage(); st.setItem('nc:v1:log', log)
 const backupKeys = (st) => [...st._m.keys()].filter((k) => k.startsWith('nc:v1:log:corrupt-'));
 const spyStorage = (initial = {}) => {
   const m = new Map(Object.entries(initial));
-  return { _m: m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) };
+  return {
+    _m: m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
+    get length() { return m.size; }, key: (i) => [...m.keys()][i] ?? null,
+  };
 };
+const tick = () => new Promise((r) => setTimeout(r, 3));
 
 test('corrupt log is backed up before being replaced', () => {
   const st = spyStorage({ 'nc:v1:log': '{bad' });
@@ -142,4 +146,44 @@ test('settings stored as string or array fall back to defaults; add validates', 
     assert.deepEqual(createStore(st).settings(), { newPerDay: 10 });
   }
   assert.throws(() => createStore(null).add({ c: 'a' }), /Invalid review/);
+});
+
+test('two instances on one storage: neither overwrites the other', () => {
+  const st = spyStorage();
+  const a = createStore(st), b = createStore(st);
+  a.add(rv('a', 3, T0));
+  a.add(rv('b', 3, T0 + 1));
+  b.add(rv('a', 2, T0 + 2));
+  const stored = JSON.parse(st._m.get('nc:v1:log'));
+  assert.deepEqual(stored.map((r) => r.t), [T0, T0 + 1, T0 + 2]);
+  a.add(rv('b', 4, T0 + 3));
+  assert.equal(JSON.parse(st._m.get('nc:v1:log')).length, 4);
+});
+
+test('reload() picks up entries written by another instance', () => {
+  const st = spyStorage();
+  const a = createStore(st), b = createStore(st);
+  b.add(rv('a', 3, T0));
+  assert.equal(a.reviews().length, 0);
+  a.reload();
+  assert.deepEqual(a.reviews().map((r) => r.t), [T0]);
+});
+
+test('three loads of the same partially bad log make one backup and keep valid entries', async () => {
+  const raw = JSON.stringify([rv('a', 3, T0), { bad: 1 }]);
+  const st = spyStorage({ 'nc:v1:log': raw });
+  for (let i = 0; i < 3; i++) { createStore(st); await tick(); }
+  assert.equal(backupKeys(st).length, 1);
+  assert.deepEqual(JSON.parse(st._m.get('nc:v1:log')), [rv('a', 3, T0)]);
+});
+
+test('export carries corrupt backups; import ignores them', () => {
+  const st = spyStorage({ 'nc:v1:log': '{bad' });
+  const s = createStore(st);
+  s.add(rv('a', 3, T0));
+  const data = JSON.parse(s.exportJson());
+  assert.deepEqual(data.corruptBackups, [{ key: backupKeys(st)[0], raw: '{bad' }]);
+  const fresh = createStore(spyStorage());
+  assert.equal(fresh.importJson(s.exportJson()).added, 1);
+  assert.equal(JSON.parse(createStore(spyStorage()).exportJson()).corruptBackups, undefined);
 });
