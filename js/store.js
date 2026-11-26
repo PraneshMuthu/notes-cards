@@ -7,7 +7,14 @@ const DEFAULT_SETTINGS = { newPerDay: 10 };
 const key = (r) => `${r.c}|${r.t}|${r.d}`;
 const validReview = (r) =>
   r && typeof r === 'object' && typeof r.c === 'string' && Number.isInteger(r.g) && r.g >= 1 && r.g <= 4 &&
-  Number.isFinite(r.t) && typeof r.d === 'string';
+  Number.isFinite(r.t) && typeof r.d === 'string' && (r.r === undefined || Number.isFinite(r.r));
+// Keep only known fields: card, grade, time, device, endless flag, replaced-entry time.
+const normalize = (r) => {
+  const e = { c: r.c, g: r.g, t: r.t, d: r.d };
+  if (r.x) e.x = true;
+  if (Number.isFinite(r.r)) e.r = r.r;
+  return e;
+};
 
 export function createStore(storage) {
   let ok = !!storage;
@@ -87,9 +94,7 @@ export function createStore(storage) {
     reload() { log = merge(readLog(), log); if (dirty && !blockLog) persist(); },
     add(review) {
       if (!validReview(review)) throw new Error('Invalid review');
-      const e = { c: review.c, g: review.g, t: review.t, d: review.d };
-      if (review.x) e.x = true;
-      log.push(e); persist();
+      log.push(normalize(review)); persist();
     },
     settings: () => ({ ...cfg }),
     saveSettings(s) { cfg = { ...DEFAULT_SETTINGS, ...(isObj(s) ? s : {}) }; write(SETTINGS, JSON.stringify(cfg)); },
@@ -109,9 +114,7 @@ export function createStore(storage) {
       for (const r of data.reviews) {
         if (seen.has(key(r))) continue;
         seen.add(key(r));
-        const e = { c: r.c, g: r.g, t: r.t, d: r.d };
-        if (r.x) e.x = true;
-        log.push(e);
+        log.push(normalize(r));
         added++;
       }
       if (added) persist();

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeFsrs, replay } from '../js/scheduler.js';
-import { pickNext, newLeftToday, counts, progress } from '../js/picker.js';
+import { makeFsrs, replay, effective } from '../js/scheduler.js';
+import { pickNext, newLeftToday, counts, progress, cardStatus } from '../js/picker.js';
 
 const f = makeFsrs({ fuzz: false });
 const now = new Date(2026, 2, 10, 12, 0, 0);
@@ -280,4 +280,30 @@ test('a new card graded Forgot shows in the Forgot view and count', () => {
   // Graded Got it afterwards: no longer counted as forgotten.
   const later = [...entries, { c: 'n', g: 3, t: ago(10 * 1000), d: '' }];
   assert.equal(counts(cards, states(cards, later), later, now, 10).forgot, 0);
+});
+
+test('replay and effective() drop reviews that were corrected', () => {
+  const cards = [card('a', 'G', 'A')];
+  const corrected = [{ c: 'a', g: 1, t: ago(5 * MIN), d: 'x' }, { c: 'a', g: 3, t: ago(5 * MIN) + 1, d: 'x', r: ago(5 * MIN) }];
+  const direct = [{ c: 'a', g: 3, t: ago(5 * MIN) + 1, d: 'x' }];
+  assert.equal(effective(corrected).length, 1);
+  assert.deepEqual(states(cards, corrected).get('a').due, states(cards, direct).get('a').due);
+  // Corrections chain: the latest wins.
+  const chain = [...corrected, { c: 'a', g: 4, t: ago(5 * MIN) + 2, d: 'x', r: ago(5 * MIN) + 1 }];
+  assert.deepEqual(effective(chain).map((e) => e.g), [4]);
+});
+
+test('cardStatus: new, learning, forgot, review labels', () => {
+  const d = (dd, h = 12) => new Date(2026, 2, dd, h).getTime();
+  assert.deepEqual(cardStatus(undefined, [], now), { kind: 'new', label: 'New' });
+  const learn = [{ c: 'a', g: 3, t: ago(2 * MIN), d: '' }];
+  assert.deepEqual(cardStatus(states([card('a')], learn).get('a'), learn, now),
+    { kind: 'learning', label: 'Learning · seen 1× today' });
+  const forgot = [{ c: 'a', g: 1, t: ago(2 * MIN), d: '' }];
+  assert.deepEqual(cardStatus(states([card('a')], forgot).get('a'), forgot, now),
+    { kind: 'forgot', label: 'Forgot last time · today' });
+  const rev = [{ c: 'a', g: 3, t: d(1), d: '' }, { c: 'a', g: 3, t: d(1) + 11 * MIN, d: '' }, { c: 'a', g: 3, t: d(4), d: '' }];
+  const st = states([card('a')], rev).get('a');
+  assert.deepEqual(cardStatus(st, rev, now), { kind: 'review', label: 'Review · 4th time · last seen 4 Mar' });
+  assert.deepEqual(cardStatus(st, rev, now, 'past'), { kind: 'review', label: 'Review · seen 3× · last seen 4 Mar' });
 });

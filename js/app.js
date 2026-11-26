@@ -2,8 +2,8 @@
 import { parseCardFile } from './parse.js';
 import { renderMarkdown } from './markdown.js';
 import { createStore } from './store.js';
-import { makeFsrs, replay } from './scheduler.js';
-import { pickNext, counts, progress } from './picker.js';
+import { makeFsrs, replay, effective } from './scheduler.js';
+import { pickNext, counts, progress, cardStatus } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +24,9 @@ let revealedAt = -Infinity, gradedAt = -Infinity; // double-tap guard (performan
 const TAP_GUARD = 350;
 const DAY = 86400000;
 let backupSnoozed = false;
+let backIdx = null; // index into history while looking back at earlier cards; null = the live card
+const GRADE_NAMES = ['', 'Forgot', 'Hard', 'Got it', 'Easy'];
+const reviews = () => effective(store.reviews()); // without grades that were later changed
 
 function banner(id, text, onDismiss) {
   let el = $(id);
@@ -57,72 +60,140 @@ function filter() {
 }
 
 function updateCounts() {
-  const c = counts(cards, states, store.reviews(), new Date(), store.settings().newPerDay);
+  const c = counts(cards, states, reviews(), new Date(), store.settings().newPerDay);
   $('counts').textContent = `Due ${c.due} · Forgot ${c.forgot} · New ${c.newLeft}`;
   banner('saveWarn', store.ok ? '' : "Progress isn't being saved on this browser — export a backup.");
   backupNag();
 }
 
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+// Topic, coloured status line and question; `mode` 'live' counts the upcoming view, 'past' views so far.
+function cardEl(card, mode) {
+  const box = el('div', 'card');
+  const st = cardStatus(states.get(card.id), reviews().filter((r) => r.c === card.id), new Date(), mode);
+  const front = el('div', 'front');
+  front.innerHTML = renderMarkdown(card.front);
+  box.append(el('div', 'topic', card.topic), el('div', `status s-${st.kind}`, st.label), front);
+  return box;
+}
+
+function updateNav() {
+  $('backBtn').disabled = backIdx === 0 || (backIdx === null && !history.length);
+  $('nextBtn').textContent = backIdx === null ? 'Next ›' : 'Forward ›';
+}
+
 function showNext() {
   pick = pickNext({
-    cards, states, reviews: store.reviews(), history, now: new Date(), fsrs,
+    cards, states, reviews: reviews(), history, now: new Date(), fsrs,
     filter: filter(), settings: store.settings(), session,
   });
-  revealed = false;
   pickedAt = Date.now();
+  renderLive();
+}
+
+// The current card, question side up.
+function renderLive() {
+  backIdx = null;
+  revealed = false;
   $('grades').hidden = true;
   $('stage').scrollTop = 0;
-  const el = document.createElement('div');
-  el.className = 'card';
+  let box;
   if (!pick) {
-    $('chip').textContent = 'Notes Cards';
-    const f = document.createElement('div');
-    f.className = 'front';
-    f.textContent = {
+    box = el('div', 'card');
+    box.append(el('div', 'front', {
       due: 'Nothing is due right now. Cards you have learned come back here when it is time to review them; your first ones arrive tomorrow.',
       forgot: 'No forgotten cards right now. Any card you mark Forgot shows up here until you get it right.',
       new: 'No new cards left in the topics you have selected.',
-    }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.';
-    el.append(f);
+    }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.'));
   } else {
-    $('chip').textContent = pick.card.topic;
-    const topic = document.createElement('div');
-    topic.className = 'topic';
-    topic.textContent = pick.card.topic;
-    const f = document.createElement('div');
-    f.className = 'front';
-    f.innerHTML = renderMarkdown(pick.card.front);
-    el.append(topic);
-    const hint = document.createElement('div');
-    hint.className = 'hint';
-    hint.textContent = 'tap to reveal';
-    el.append(f, hint);
+    box = cardEl(pick.card, 'live');
+    box.append(el('div', 'hint', 'tap to reveal'));
   }
-  $('stage').replaceChildren(el);
+  $('stage').replaceChildren(box);
+  updateNav();
+  updateCounts();
+}
+
+// An earlier card from this session: answer open, read-only, with a small "change grade" row.
+function renderPast(i) {
+  backIdx = i;
+  revealed = false;
+  $('grades').hidden = true;
+  $('stage').scrollTop = 0;
+  const h = history[i];
+  const card = cards.find((c) => c.id === h.id);
+  if (!card) { renderLive(); return; }
+  const box = cardEl(card, 'past');
+  const back = el('div', 'back');
+  back.innerHTML = renderMarkdown(card.back);
+  box.append(back);
+  const row = el('div', 'regrade');
+  if (h.skip) row.append(el('span', '', 'You skipped this card.'));
+  else {
+    // Only the card's latest grade can be changed (a later review would already have built on it).
+    const latest = reviews().filter((r) => r.c === h.id).reduce((a, b) => (!a || b.t >= a.t ? b : a), null);
+    const editable = latest && latest.t === h.t && latest.d === store.deviceId;
+    row.append(el('span', '', editable ? 'Your grade · change:' : `You graded it ${GRADE_NAMES[h.g]}.`));
+    if (editable) {
+      for (let g = 1; g <= 4; g++) {
+        const b = el('button', `mini g${g}${g === h.g ? ' on' : ''}`, GRADE_NAMES[g]);
+        b.onclick = (e) => { e.stopPropagation(); changeGrade(i, g); };
+        row.append(b);
+      }
+    }
+  }
+  box.append(row);
+  $('stage').replaceChildren(box);
+  updateNav();
+}
+
+function back() {
+  if (backIdx === null) { if (history.length) renderPast(history.length - 1); }
+  else if (backIdx > 0) renderPast(backIdx - 1);
+}
+
+function next() {
+  if (backIdx === null) { skip(); return; }
+  if (backIdx + 1 < history.length) renderPast(backIdx + 1);
+  else renderLive(); // back to the current card, unchanged
+}
+
+// Replace the grade given to an earlier card: append a correction entry (r = replaced time) and rebuild.
+function changeGrade(i, g) {
+  const h = history[i];
+  if (!h || h.skip || g === h.g) return;
+  store.add({ c: h.id, g, t: h.t + 1, d: store.deviceId, r: h.t, ...(h.x && { x: true }) });
+  h.t += 1; h.g = g;
+  states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
+  renderPast(i);
   updateCounts();
 }
 
 function reveal() {
-  if (!pick || revealed || performance.now() - gradedAt < TAP_GUARD) return;
+  if (backIdx !== null || !pick || revealed || performance.now() - gradedAt < TAP_GUARD) return;
   revealed = true;
   revealedAt = performance.now();
-  const back = document.createElement('div');
-  back.className = 'back';
-  back.innerHTML = renderMarkdown(pick.card.back);
-  const card = $('stage').firstChild;
-  card.querySelector('.hint').replaceWith(back);
+  const b = el('div', 'back');
+  b.innerHTML = renderMarkdown(pick.card.back);
+  $('stage').firstChild.querySelector('.hint').replaceWith(b);
   $('grades').hidden = false;
 }
 
 function grade(g) {
-  if (!pick || !revealed || performance.now() - revealedAt < TAP_GUARD) return;
+  if (backIdx !== null || !pick || !revealed || performance.now() - revealedAt < TAP_GUARD) return;
   revealed = false; // guards against double taps
   gradedAt = performance.now();
   const { card, endless } = pick;
   const now = new Date();
   store.add({ c: card.id, g, t: now.getTime(), d: store.deviceId, ...(endless && { x: true }) });
   states.set(card.id, fsrs.next(states.get(card.id) ?? createEmptyCard(now), now, g).card);
-  history.push({ id: card.id, at: now.getTime() });
+  history.push({ id: card.id, at: now.getTime(), t: now.getTime(), g, ...(endless && { x: true }) });
   session.lastGroup = ui.lastGroup = card.group;
   saveUi();
   if (endless) session.endlessCount++;
@@ -283,10 +354,12 @@ document.addEventListener('keydown', (e) => {
   if (!$('menu').hidden || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.target.closest?.('button, input, select, label, summary, a')) return;
   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
-  else if ('1234'.includes(e.key)) grade(Number(e.key));
-  else if (e.key === 's' || e.key === 'ArrowRight') skip();
+  else if ('1234'.includes(e.key)) { if (backIdx === null) grade(Number(e.key)); else changeGrade(backIdx, Number(e.key)); }
+  else if (e.key === 's' || e.key === 'ArrowRight') next();
+  else if (e.key === 'ArrowLeft') back();
 });
-$('skipBtn').onclick = skip;
+$('backBtn').onclick = () => { back(); document.activeElement?.blur(); };
+$('nextBtn').onclick = () => { next(); document.activeElement?.blur(); };
 $('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a')) reveal(); });
 for (const b of document.querySelectorAll('#grades button')) b.onclick = () => grade(Number(b.dataset.g));
 
@@ -327,7 +400,7 @@ async function main() {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
-    if (!revealed && Date.now() - pickedAt > 5 * 60000) showNext(); else updateCounts();
+    if (backIdx === null && !revealed && Date.now() - pickedAt > 5 * 60000) showNext(); else updateCounts();
   });
 }
 main();

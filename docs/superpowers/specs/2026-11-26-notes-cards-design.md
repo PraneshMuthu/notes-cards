@@ -237,3 +237,21 @@ Each problem gets about 10–20 cards, covering:
 3. For phase 2 only:
    - Create the private repo `notes-cards-progress`.
    - Create a fine-grained token for it.
+
+## Additions after launch (2026-11-26)
+
+- **Skip / Next:** move on without grading. Nothing is logged. A skipped card stays away for ~10 min, even if its relearning step is due.
+- **Bottom navigation:** ‹ Back / Next ›.
+  - Back steps through this session's earlier cards read-only, with the answer open.
+  - Forward walks back toward the live card.
+- **Change grade** (look-back only, the card's latest grade only):
+  - Appends a correction entry `{…, r: <replaced t>}`, so the log stays append-only and phase-2 union sync still works.
+  - `effective()` drops replaced entries before replay and before counting.
+- **Status line on every card,** colour-coded with the grade colours:
+  - New (blue)
+  - Learning · seen N× today (amber)
+  - Review · Nth time · last seen <date> (green)
+  - Forgot last time (red)
+- **"Forgot"** = relearning, or still learning after the last grade was Forgot. This includes new cards graded Forgot.
+- **Top bar:** plain-word counters (Due / Forgot / New). The topic label moved onto the card. The menu shows "Seen X of Y" overall and per group.
+- **Deploy:** `.nojekyll` at the root, so GitHub Pages serves the raw card `.md` files.

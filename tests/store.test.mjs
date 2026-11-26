@@ -187,3 +187,14 @@ test('export carries corrupt backups; import ignores them', () => {
   assert.equal(fresh.importJson(s.exportJson()).added, 1);
   assert.equal(JSON.parse(createStore(spyStorage()).exportJson()).corruptBackups, undefined);
 });
+
+test('a grade correction keeps its r (replaced time) through add and import', () => {
+  const mem = new Map(); const st = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, String(v)) };
+  const s = createStore(st);
+  s.add({ c: 'a', g: 1, t: 1000, d: 'dev' });
+  s.add({ c: 'a', g: 3, t: 1001, d: 'dev', r: 1000 });
+  assert.equal(s.reviews()[1].r, 1000);
+  const s2 = createStore({ getItem: () => null, setItem: () => {} });
+  assert.equal(s2.importJson(s.exportJson()).added, 2);
+  assert.equal(s2.reviews()[1].r, 1000);
+});

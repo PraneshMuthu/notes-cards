@@ -30,11 +30,10 @@ button { cursor: pointer; }
 .card .topic { font-size: 13px; color: var(--muted); letter-spacing: .02em; margin-bottom: 8px; }
 .seen { margin: 4px 0 2px; font-size: 18px; font-weight: 600; }
 .seen-groups { margin: 0 0 8px; font-size: 15px; color: var(--muted); }
-.skip-btn { background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 15px; color: var(--muted); white-space: nowrap; touch-action: manipulation; }
 #banners:empty { display: none; }
 .banner { background: var(--warn-bg); color: var(--warn-fg); padding: 10px 14px; font-size: 15px; display: flex; gap: 10px; align-items: center; }
 .banner button { margin-left: auto; background: none; border: 0; font-size: 18px; color: inherit; }
-#stage { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 14px calc(16px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; touch-action: manipulation; }
+#stage { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 14px; -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px 18px; min-height: 55%; overflow-wrap: anywhere; animation: up .2s ease-out; }
 @keyframes up { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 .front { font-size: 22px; font-weight: 600; line-height: 1.35; }
@@ -49,7 +48,19 @@ pre code { padding: 0; background: none; }
 table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 16px; }
 th, td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
 summary { cursor: pointer; color: var(--accent); }
-#grades { display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+#bottom { border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+#grades { display: flex; gap: 8px; padding: 10px 14px 0; }
+#nav { display: flex; justify-content: space-between; gap: 8px; padding: 8px 14px 10px; }
+#nav button { flex: 1; max-width: 160px; padding: 10px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--muted); font-size: 15px; touch-action: manipulation; }
+#nav button:disabled { opacity: .4; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.s-new { color: var(--g4); } .s-learning { color: var(--g2); } .s-review { color: var(--g3); } .s-forgot { color: var(--g1); }
+.regrade { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--line); font-size: 14px; color: var(--muted); }
+.regrade .mini { padding: 4px 10px; border-radius: 999px; border: 1px solid; background: none; font-size: 13px; touch-action: manipulation; }
+.regrade .mini.on { color: #fff; }
+.regrade .mini.g1.on { background: var(--g1); } .regrade .mini.g2.on { background: var(--g2); }
+.regrade .mini.g3.on { background: var(--g3); } .regrade .mini.g4.on { background: var(--g4); }
 #grades[hidden], #menu[hidden] { display: none; }
 #grades button { touch-action: manipulation; flex: 1; min-width: 0; padding: 14px 4px; border-radius: 12px; border: 2px solid; background: var(--card); font-weight: 600; }
 .g1 { border-color: var(--g1) !important; color: var(--g1); } .g2 { border-color: var(--g2) !important; color: var(--g2); }

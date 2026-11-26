@@ -44,6 +44,33 @@ export function counts(cards, states, reviews, now, newPerDay) {
   return { due, forgot, newLeft: Math.min(newLeftToday(reviews, cards, now, newPerDay), fresh) };
 }
 
+const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
+const dayLabel = (t, now) => {
+  const k = dayKey(new Date(t));
+  if (k === dayKey(now)) return 'today';
+  if (k === dayKey(new Date(now.getTime() - 86400000))) return 'yesterday';
+  return new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+};
+
+/**
+ * One-line status for a card. `reviews` = this card's effective reviews (any extra cards are ignored
+ * only if the caller filtered them). mode 'live' counts the upcoming view; 'past' counts views so far.
+ * @returns {{kind: 'new'|'learning'|'forgot'|'review', label: string}}
+ */
+export function cardStatus(state, reviews, now, mode = 'live') {
+  if (!state || !reviews.length) return { kind: 'new', label: 'New' };
+  const last = reviews.reduce((a, b) => (b.t >= a.t ? b : a));
+  const q = queueOf(state, now);
+  if (isForgotten(q, last.g)) return { kind: 'forgot', label: `Forgot last time · ${dayLabel(last.t, now)}` };
+  if (q === 'learning') {
+    const today = reviews.filter((r) => dayKey(new Date(r.t)) === dayKey(now)).length;
+    return { kind: 'learning', label: today ? `Learning · seen ${today}× today` : `Learning · last seen ${dayLabel(last.t, now)}` };
+  }
+  const n = reviews.length;
+  const count = mode === 'past' ? `seen ${n}×` : `${ordinal(n + 1)} time`;
+  return { kind: 'review', label: `Review · ${count} · last seen ${dayLabel(last.t, now)}` };
+}
+
 /** Cards seen (graded at least once) out of the deck, overall and per group (sorted by group). */
 export function progress(cards, states) {
   const by = new Map();

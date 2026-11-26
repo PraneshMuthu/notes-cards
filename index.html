@@ -17,17 +17,22 @@
 <header id="bar">
   <span id="chip" class="chip">Notes Cards</span>
   <span id="counts" aria-live="polite"></span>
-  <button id="skipBtn" class="skip-btn" aria-label="Skip this card">Skip &#8250;</button>
   <button id="menuBtn" class="icon-btn" aria-label="Menu">&#9776;</button>
 </header>
 <div id="banners"></div>
 <main id="stage"></main>
+<div id="bottom">
 <footer id="grades" hidden>
   <button data-g="1" class="g1">Forgot</button>
   <button data-g="2" class="g2">Hard</button>
   <button data-g="3" class="g3">Got it</button>
   <button data-g="4" class="g4">Easy</button>
 </footer>
+<nav id="nav">
+  <button id="backBtn" aria-label="Previous card">&#8249; Back</button>
+  <button id="nextBtn" aria-label="Next card">Next &#8250;</button>
+</nav>
+</div>
 <div id="menu" hidden>
   <div class="sheet" role="dialog" aria-label="Menu">
     <div class="sheet-head"><strong>Menu</strong><button id="menuClose" class="icon-btn" aria-label="Close">&#10005;</button></div>

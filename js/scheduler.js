@@ -15,7 +15,7 @@ export function makeFsrs({ fuzz = true } = {}) {
  * @returns {Map<string, object>}
  */
 export function replay(entries, f, knownIds) {
-  const sorted = entries.filter((e) => knownIds.has(e.c)).sort((a, b) => a.t - b.t);
+  const sorted = effective(entries).filter((e) => knownIds.has(e.c)).sort((a, b) => a.t - b.t);
   const cards = new Map();
   for (const e of sorted) {
     const now = new Date(e.t);
@@ -23,6 +23,16 @@ export function replay(entries, f, knownIds) {
     cards.set(e.c, f.next(card, now, e.g).card);
   }
   return cards;
+}
+
+/**
+ * The log minus reviews that a later "change grade" replaced. A correction is a normal entry
+ * plus `r` = the time of the entry it replaces (same card and device), so the log stays append-only.
+ */
+export function effective(entries) {
+  const replaced = new Set();
+  for (const e of entries) if (Number.isFinite(e.r)) replaced.add(`${e.c}|${e.r}|${e.d}`);
+  return replaced.size ? entries.filter((e) => !replaced.has(`${e.c}|${e.t}|${e.d}`)) : entries;
 }
 
 export function retrievability(f, card, now) {
