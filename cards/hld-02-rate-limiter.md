@@ -16,7 +16,12 @@ Middleware in the 30 app servers (not a separate service): the 2 ms budget buys 
 
 ## What are the locked requirements and numbers? {#hld02-spec}
 Key = API key. Tiers: Free 10/s, Pro 100/s, Enterprise up to 10,000/s. Burst up to 2x is fine. Overshoot ~1% OK, undershoot ~0. p99 added latency <= 2 ms. Rule change live in ~10 s. 50k QPS peak, ~20k active keys, 30 servers, single region.
-**Why:** a rejected request does not consume budget, or a retry loop could never recover.
+**Why:** the error is asymmetric. Overshoot is a bit of extra backend load; undershoot is a paying customer wrongly rejected.
+
+## Why a token bucket? {#hld02-token-bucket}
+A bucket refills at a steady rate (the limit); each request takes one token; capacity is the allowed burst.
+**Why:** a 2x burst is a requirement, so capacity = 2 x rate. The bucket expresses burst natively and sustained excess still drains it.
+**Example:** a prepaid card topped up a little every second: you can spend a lump at once, but not forever.
 
 ## Why is the 1% overshoot an "error budget", not a permission? {#hld02-tolerance}
 It is the counting mechanism's tolerance. The customer's limit is still the limit.
@@ -24,7 +29,7 @@ It is the counting mechanism's tolerance. The customer's limit is still the limi
 **Why asymmetric:** overshoot is a bit of extra backend load; undershoot is a paying customer wrongly rejected.
 
 ## Why no durability for counters? {#hld02-durability}
-The enforcement window is ~1 s and counters are derived from live traffic. Wipe them all and a key gets a fresh allowance (up to ~2x its limit for that one second), then it self-heals. So no AOF/RDB, no backups.
+The enforcement window is ~1 s and counters are derived from live traffic. Wipe them all and a key gets a fresh allowance (up to ~2x its limit for that one second), then it self-heals. So no AOF or RDB (Redis's append-only log and snapshot files), no backups.
 **Why:** any Redis replica is for availability, not durability. The inverse of URL shortener, where one lost row is a dead link.
 
 ## What is the ops amplification and Redis headroom ratio? {#hld02-amplification}
@@ -33,9 +38,9 @@ Each decision needs the rule and the counter: 50,000 req/s x 2 ops = 100,000 ops
 **Fix:** move rules in-process: 1 op, ratio 0.5.
 
 ## Where does the limiter live, and what rules out the others? {#hld02-placement}
-Middleware library in each app server. p99 per hop is ~1 ms (0.5 ms median, tail 2-3x), so 2 ms buys one hop. A dedicated service or gateway tier costs app->limiter->Redis = 2 hops. Sidecar is the runner-up.
+Middleware library in each app server. p99 per hop is ~1 ms (0.5 ms median, tail 2-3x), so a second hop leaves no slack in 2 ms. A dedicated service or gateway tier costs app->limiter->Redis = 2 hops. Sidecar is the runner-up.
+**Enabler:** only ~1,667 QPS per server (50,000 / 30) and 10 MB of rules make in-process viable.
 **Cost:** deploy coupling, blast radius, one implementation per language.
-**Rule:** let the constraint eliminate options before preference does.
 
 ## How are rules distributed to 30 servers? {#hld02-rules}
 Every server holds a full in-process replica: 200k rules x 50 B = 10 MB. It polls an 8-byte `rules:version` key every 5 s (30 / 5 = 6 reads/s) and fetches the snapshot only when the version moves. Unknown key means Free tier, never reject.
@@ -46,14 +51,9 @@ Push would only trigger the fetch the poll already does, sooner. Polling 1/s is 
 **Rule:** price the simpler option first. "X alone is unsafe" does not mean "do both".
 **Push pays off** at ~1,000+ consumers, not for freshness.
 
-## What does the Redis Lua script do, and why one script? {#hld02-lua}
-Atomically: read `{tokens, last_refill}`, refill = min(capacity, tokens + elapsed x rate), take a token if there is >= 1, write, and return `{allowed, remaining, reset}`.
-**Why:** atomic inside Redis, so two servers cannot both read `tokens = 1` and both allow (no lock). It returns the FR-5 header values for free, and only decrements on allow.
-**Why TTL is free:** a key idle long enough to expire has refilled anyway.
-
-## Why does a lock or `GET`+`INCR` not work? {#hld02-no-lock}
-A lock costs about a round trip to acquire plus one to release, more than the whole 2 ms budget. `GET` then `INCR` is check-then-act: two servers both see 9 of 10 and both allow.
-**Why:** atomic read-modify-write belongs server-side. This replaces the per-key lock from the single-process (LLD) version.
+## What does the Redis Lua script do, and why not a lock? {#hld02-lua}
+Atomically: read `{tokens, last_refill}`, refill = min(capacity, tokens + elapsed x rate), take a token if >= 1, write, return `{allowed, remaining, reset}`. A denial costs nothing (rejected requests do not consume budget, or a retry loop could never recover).
+**Why:** one lock round trip costs about the whole 2 ms budget, and `GET` then `INCR` is check-then-act: two servers both see 9 of 10 and both allow. It also returns the X-RateLimit-Limit/Remaining/Reset header values for free.
 
 ## Why does sharding Redis not fix a hot key? {#hld02-hot-key}
 One customer is 5,000 QPS on a single Redis key. A key hashes to one of 16,384 slots, and a slot lives on one node, so adding nodes leaves it on one node while the rest idle.
@@ -85,18 +85,13 @@ A Redis answering in 800 ms turns a 2 ms budget into an 800 ms API. Use a ~5 ms 
 
 ## Whose clock does the token bucket use? {#hld02-clock}
 Redis's own, via `TIME` inside the Lua script.
-**Why:** a `now_ms` from 30 app servers means 30 clocks. A server 200 ms fast grants 200 ms of free tokens on every request. NTP skew of tens of ms is normal. One clock, on the machine owning the counter, costs nothing.
+**Why:** a `now_ms` from 30 app servers means 30 clocks. A server 200 ms fast grants 200 ms of free tokens on every request. NTP (network time sync) skew of tens of ms is normal. One clock, on the machine owning the counter, costs nothing.
+
+## Redis sits at ratio 0.5. What if traffic spikes 2x? {#hld02-spike}
+A 2x spike puts it back at ratio 1.0, the trip point for moving to Redis Cluster. The circuit breaker plus local fallback cover the gap while you scale.
+**Why:** headroom is a number you state, not a verdict. At 0.5 you survive a spike; at 1.0 you are one failover from degraded mode.
+**Weak spots to name:** deploy coupling, and `limit / 30` being a constant.
 
 ## What breaks at 10x (500k QPS), and what is the fix? {#hld02-10x}
 Counter ops reach 500,000 ops/s: Redis Cluster, 5 nodes minimum, ~8 for headroom (ratio 0.63). The hot key hits 50,000 ops/s: key-splitting. Rules stay 10 MB. Poll is 300 / 5 = 60 reads/s (revisit push at ~1,000 servers).
 **Why it is already cluster-ready:** the Lua script touches exactly one key, since Cluster forbids a command spanning slots.
-
-## Why is the dataset only ~11 MB, and what is the real constraint? {#hld02-size}
-Rules: 200k x 50 B = 10 MB. Counters: 20k active x 70 B = 1.4 MB (idle ones expire).
-**Why:** storage is a non-issue. The binding constraint is operations per second, and the one that adding nodes cannot fix is the hot key.
-
-## What weak spots do you name yourself in the rate limiter? {#hld02-weak-spots}
-1. Deploy coupling: a limiter fix needs an app deploy (exit: sidecar, ~0.1 ms).
-2. A 429 still costs a connection and a few hundred microseconds of app server.
-3. `limit / 30` is a config constant.
-4. A whale pinned at its limit makes the sub-bucket retry cost 2 ops/req; cache the DENY locally.

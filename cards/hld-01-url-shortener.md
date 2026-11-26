@@ -4,19 +4,18 @@ group: HLD
 ---
 
 ## Pitch a URL shortener in 30 seconds. {#hld01-pitch}
-Two ops: create (~12 QPS) and redirect (~1,200 avg, ~6,000 peak, 100:1 read-heavy). LB, 3-4 stateless app servers, Redis cache-aside for reads, one Postgres primary with a failover replica. Codes are 7 random base62 chars; the primary key catches collisions. Redirect is a 301.
+Two ops: create (~12 QPS) and redirect (~1,200 avg, ~6,000 peak, 100:1 read-heavy). LB, 3-4 stateless app servers, Redis with cache-aside (the app reads the DB on a miss and fills the cache) for reads, one Postgres primary with a failover replica. Codes are 7 random base62 chars; the primary key catches collisions. Redirect is a 301.
 **Why:** the 100x read/write gap is the whole story, so caching is the main lever.
 **Example:** a phone book you look up constantly but rarely add to.
 
-## What requirements do you pin down before designing a URL shortener? {#hld01-requirements}
-Functional: shorten, custom alias, redirect. Out of scope: analytics, expiry, update/delete, accounts, rate limiting.
-Non-functional: ~1M creates/day, 100:1 reads, redirect p99 < 100 ms, 99.9% availability, never lose a mapping, read-your-writes, unpredictable codes.
-**Why:** availability is asymmetric. A dead redirect breaks links already printed in the wild; a failed create costs one retry.
+## What requirements and numbers do you pin down for a URL shortener? {#hld01-requirements}
+Functional: shorten, custom alias, redirect. Out: analytics, expiry, update/delete, accounts, rate limiting. Non-functional: redirect p99 < 100 ms, 99.9% availability, never lose a mapping, read-your-writes (a just-created link works at once), unguessable codes.
+**Numbers:** 1M/day / 86,400 = ~12 writes/s; x100 = 1,200 reads/s; x5 = 6,000 peak. 1M x 500 B = 500 MB/day, ~0.9 TB in 5 years: one DB node. Redirect ~1 KB x 6k = ~6 MB/s: trivial. Hot set 50-500 MB: one Redis.
+**Why:** a dead redirect hurts far more than a failed create.
 
-## Estimate storage for 5 years of links. {#hld01-storage}
-1M/day x 500 B = 500 MB/day. x 365 x 5 is about 0.9 TB (~1 TB).
-**Why:** it fits one DB node, so storage alone never forces sharding. If you shard, it is for throughput, RAM or recovery time.
-**Trap:** powers of ten. Divide back to check (5 MB / 1M records = 5 B, not 500 B).
+## Why 3-4 app servers and no Key Generation Service? {#hld01-app-servers}
+Availability, not throughput: one server means a crash or deploy is a total outage (~99%, not 99.9%), so N >= 2. At ~2,000 QPS each, 6,000 / 2,000 = 3, plus 1 spare = 4.
+**Why no key service:** random codes need no coordination between servers, and the DB unique constraint is the backstop. A service adds a ~0.5 ms hop and a new failure point for nothing. Only a counter scheme would need it, and that was rejected.
 
 ## Why 7 base62 characters and not 6? {#hld01-key-length}
 ~2B URLs in 5 years. 62^6 = 57B fits by count, but then it is 3.5% full, so a random guess hits a live URL ~1 in 28. 62^7 = 3.5T is 0.06% full, ~1 in 1,760.
@@ -48,8 +47,13 @@ Both miss the lookup, both INSERT. The DB commits one; the loser catches the uni
 **Trap:** idempotent means same effect on server state, not same bytes (201 vs 200 is fine).
 
 ## How do you generate codes, and why no pre-check SELECT? {#hld01-key-gen}
-Draw 7 random chars with a CSPRNG (`secrets`, not `Math.random`), INSERT, and let the primary key catch collisions. Retry up to 3 times, then 503 + Retry-After.
-**Why:** a SELECT-then-INSERT is TOCTOU (time-of-check to time-of-use): two servers both see the code free. Only the constraint is safe. Try-and-catch beats check-then-act.
+Draw 7 random chars with a CSPRNG (cryptographically secure random generator: `secrets`, not `Math.random`), INSERT, and let the primary key catch collisions. Retry up to 3 times, then 503 + Retry-After.
+**Why:** SELECT-then-INSERT is TOCTOU (time-of-check to time-of-use): two servers both see the code free. Only the constraint is safe. Try-and-catch beats check-then-act.
+
+## A create INSERT fails. How do a PK violation and a UNIQUE violation differ? {#hld01-violations}
+- `PRIMARY KEY (code)`: two different URLs drew the same random code. Retry with a new code; the client never notices.
+- `UNIQUE (long_url)` (partial): two identical URLs raced to be first. Re-read and return the winner's code with 200; never retry generation.
+**Why:** conflating them is the classic mistake. Same event type, opposite handling.
 
 ## How likely are collisions, and how many retries? {#hld01-collisions}
 p = 2x10^9 / 3.5x10^12 = 5.7x10^-4 (1 in 1,760) at 5-year fill. Attempts = 1/(1-p) = 1.0006, about 570 retries/day.
@@ -67,35 +71,26 @@ The retry rate, not the failure rate. Retries scale as f (fill ratio), failures 
 **Example:** reaching 50% fill takes ~4,800 years at 1M/day. The escape hatch is 8 chars: 62x space, backward compatible.
 
 ## What does the system do when Postgres is down? {#hld01-cap}
-CAP is per-operation. Create is CP: fail with a retryable 503, because without the DB you cannot enforce uniqueness or durability. Redirect is AP for the hot set: Redis still serves ~93% of 6,000 QPS.
-**Why:** mappings are immutable, so cached values cannot be stale. Availability costs no consistency.
+CAP is per-operation. CP = refuse rather than be wrong; AP = answer rather than refuse.
+Create is CP: no DB means no uniqueness or durability check, so return a retryable 503. Redirect is AP for the hot set: Redis still serves ~90-95% (e.g. 93% of 6,000 QPS).
+**Why:** mappings are immutable, so cached values cannot be stale; availability costs no consistency.
 **Trap:** misses return 503, never 404. You cannot tell "does not exist" from "cannot check".
 
 ## Why is the read replica idle? {#hld01-replica}
-It is for failover (durability: never lose a mapping), not read load. After a ~95% cache hit the DB sees only ~300 read QPS.
+It is for failover (durability: never lose a mapping), not read load. After a ~90-95% cache hit the DB sees only ~300 read QPS.
 **Why:** serving redirects from an async replica breaks read-your-writes: a creator checking a fresh link could get a 404 on a live link.
 
 ## Why write-around caching, and how does LRU cope? {#hld01-write-around}
 Creates write only to the DB. Redirects use cache-aside: read Redis, on miss read the DB and backfill.
-**Why:** write-around keeps one system of record, so no dual-write ("DB committed, cache write failed?"). The cost is at most ~1 point of hit rate. Cache death is degraded, not an outage. Links are immutable, so no invalidation or TTL needed; LRU self-sorts hot from cold.
-
-## What breaks first at 10x (58k read QPS, 580 write QPS)? {#hld01-10x}
-The DB connection pool: 30 servers x 20 connections = 600, and Postgres forks a process per connection (knee ~300-500). Fix: PgBouncer (a connection pooler), one extra ~0.2 ms hop.
-**Why:** the 58k read path is healthy because of the cache. Next: Redis at 55k of ~100k ops/s, so shard it by `code`.
-**Example:** 600 waiters, 12 tables.
+**Why:** write-around keeps one system of record, so no dual-write ("DB committed, cache write failed?"). The cost is at most ~1 point of hit rate. Links are immutable, so no invalidation and no TTL (time-to-live expiry) needed; LRU (evict least-recently-used) self-sorts hot from cold.
 
 ## At 10x, what does the dedup index cost, and how do you shrink it? {#hld01-dedup-index}
 18B rows x 516 B = 9.4 TB, bigger than the 9.1 TB table, with a B-tree about 9 levels deep.
+**At 10x** (58k reads, 580 writes) the first break is the DB connection pool, 30 x 20 = 600 (fix: PgBouncer).
 **Fix:** index a 128-bit hash of the URL (16 B): ~580 GB, depth ~5. Query by hash AND `long_url`.
 **Why 128 bits:** at 64 bits the birthday bound gives about 9 false collisions, each wrongly rejecting a real URL.
 
 ## Why do you really shard, and what blocks it? {#hld01-sharding}
 Not disk (19 TB fits). Restoring 19 TB at 500 MB/s takes ~11 h, more than the 8.76 h/year downtime budget at 99.9%. RAM is only ~3%. Sharding on `code` fixes both.
-**Why dedup blocks it:** UNIQUE(long_url) is global uniqueness on a different key, which needs a 2PC or an index table. Drop dedup at that scale: it costs an index, a lookup, a race and the shard key.
+**Why dedup blocks it:** UNIQUE(long_url) is global uniqueness on a different key, which needs a distributed transaction (2PC, two-phase commit: slow, all shards agree) or an index table. Drop dedup at that scale.
 **Rule:** the strongest guarantee breaks first.
-
-## What weak spots do you name before the interviewer does? {#hld01-weak-spots}
-1. Redis dying sends 6,000 QPS onto one Postgres: ugly, not down. Fix with a Redis replica or an in-process LRU.
-2. No rate limiting, so anyone can burn key space (Problem 02).
-3. Single region.
-4. Unauthenticated custom aliases allow squatting (`google`).
