@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFsrs, replay, effective } from '../js/scheduler.js';
-import { pickNext, newLeftToday, counts, progress, cardStatus, isLeech, LEECH_LAPSES } from '../js/picker.js';
+import { pickNext, newLeftToday, todaysNew, counts, progress, cardStatus, isLeech, LEECH_LAPSES } from '../js/picker.js';
 
 const f = makeFsrs({ fuzz: false });
 const now = new Date(2026, 2, 10, 12, 0, 0);
@@ -94,7 +94,7 @@ test('cap resets at 4 AM, recomputed per call', () => {
   assert.equal(counts(cards, new Map(), reviews, new Date(2026, 2, 10, 3, 59), 10).newLeft, 0);
 });
 
-test('endless: weakest first, every 5th new', () => {
+test('endless: weakest first, never-seen cards stay out once the limit is used', () => {
   const studied = [card('s1', 'G', 't1'), card('s2', 'G', 't2'), card('s3', 'G', 't3'), card('s4', 'G', 't4')];
   const cards = [...studied, card('n1', 'G', 't5'), card('n2', 'G', 't6')];
   // s1 oldest (weakest) ... s4 newest; all "later" (not due) so tiers 1-3 empty.
@@ -115,7 +115,8 @@ test('endless: weakest first, every 5th new', () => {
     sess.endlessCount++;
   }
   assert.deepEqual(out.slice(0, 4), [['s1', 'weak', true], ['s2', 'weak', true], ['s3', 'weak', true], ['s4', 'weak', true]]);
-  assert.equal(out[4][1], 'endless-new');
+  assert.equal(out[4][1], 'weak');
+  assert.ok(!['n1', 'n2'].includes(out[4][0]));
 });
 
 test('no repeat within window', () => {
@@ -149,7 +150,7 @@ test('round: every card once before any repeats, then a new round', () => {
   for (let i = 0; i < 24; i++) {
     const t = new Date(now.getTime() + i * MIN);
     const r = pickNext({ cards, states: replay(reviews, f, new Set(cards.map((c) => c.id))), reviews, history,
-      now: t, fsrs: f, filter: filterAll, settings: { newPerDay: 3 }, session: { endlessCount: i }, roundStart });
+      now: t, fsrs: f, filter: filterAll, settings: { newPerDay: 12 }, session: { endlessCount: i }, roundStart });
     if (r.newRound) roundStart = t.getTime();
     assert.equal(r.newRound, i === 12, `newRound at ${i}`);
     assert.deepEqual(r.round, { pos: (i % 12) + 1, total: 12 }, `position at ${i}`);
@@ -220,7 +221,7 @@ test('small deck rotates: no back-to-back repeats, all cards seen', () => {
   for (const id of ['a', 'b', 'c']) assert.ok(seen[id] >= 7, `${id} seen ${seen[id]}`);
 });
 
-test('endless: new cards only on every 5th pick, never bypass cap', () => {
+test('endless: never bypasses the daily limit', () => {
   const cards = Array.from({ length: 8 }, (_, i) => card(`c${i}`, 'G', `t${i}`));
   // Six cards were first-reviewed today (graduated far into the future via Easy), using up the cap.
   const reviews = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'].flatMap((id, i) => [
@@ -232,8 +233,8 @@ test('endless: new cards only on every 5th pick, never bypass cap', () => {
   const history = [];
   for (let n = 0; n < 5; n++) {
     const r = pick({ cards, states: st, reviews, history, settings: { newPerDay: 2 }, session: { endlessCount: n } });
-    if (n < 4) { assert.equal(r.queue, 'weak', `pick ${n}`); history.push({ id: r.card.id, at: now.getTime() }); }
-    else assert.equal(r.queue, 'endless-new');
+    assert.equal(r.queue, 'weak', `pick ${n}`);
+    history.push({ id: r.card.id, at: now.getTime() });
   }
 });
 
@@ -265,8 +266,9 @@ test('endless weak list skips learning/relearning cards whose step is not due ye
   const entries = [{ c: 'l', g: 3, t: ago(MIN), d: '' }]; // learning, next step in ~10 min
   const st = states(cards, entries);
   assert.ok(st.get('l').due.getTime() > now.getTime());
+  // The limit (1) is used by 'l', so the unseen 'n' waits; the early step is offered instead.
   const r = pick({ cards, states: st, reviews: entries, settings: { newPerDay: 1 } });
-  assert.deepEqual([r.card.id, r.queue], ['n', 'endless-new']);
+  assert.deepEqual([r.card.id, r.queue], ['l', 'weak']);
   // A settled (graduated, not due) card is preferred over the early step even if it is stronger.
   const g = [...graduated('g', 2)];
   const both = [cards[0], card('g', 'G', 'C')];
@@ -357,4 +359,18 @@ test('leech: a learned card forgotten LEECH_LAPSES times is flagged', () => {
   assert.equal(s2.kind, 'forgot');
   assert.match(s2.label, /Leech/);
   assert.equal(isLeech(undefined), false);
+});
+
+test('skipping a new card uses one of today\'s slots and it comes back in the next round', () => {
+  const cards = [card('a', 'G', 'A'), card('b', 'G', 'B'), card('c', 'G', 'C')];
+  const history = [{ id: 'a', at: ago(2 * MIN), skip: true }];
+  assert.deepEqual(todaysNew([], cards, now, history), ['a']);
+  assert.equal(newLeftToday([], cards, now, 2, history), 1);
+  const r1 = pick({ cards, history, settings: { newPerDay: 2 } });
+  assert.notEqual(r1.card.id, 'a');
+  history.push({ id: r1.card.id, at: ago(MIN), skip: true });
+  // Both slots used (two skips): the third card stays out, and the round restarts with 'a'.
+  const r2 = pick({ cards, history, settings: { newPerDay: 2 } });
+  assert.equal(r2.card.id, 'a');
+  assert.equal(r2.newRound, true);
 });

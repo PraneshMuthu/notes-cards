@@ -3,7 +3,7 @@ import { parseCardFile } from './parse.js';
 import { renderMarkdown } from './markdown.js';
 import { createStore } from './store.js';
 import { makeFsrs, replay, effective } from './scheduler.js';
-import { pickNext, counts, progress, cardStatus, newLeftToday, isLeech } from './picker.js';
+import { pickNext, counts, progress, cardStatus, todaysNew, isLeech } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -60,7 +60,7 @@ function filter() {
 }
 
 function updateCounts() {
-  const c = counts(cards, states, reviews(), new Date(), store.settings().newPerDay);
+  const c = counts(cards, states, reviews(), new Date(), store.settings().newPerDay, history);
   $('counts').textContent = `Due ${c.due} · Forgot ${c.forgot} · New ${c.newLeft}`;
   banner('saveWarn', store.ok ? '' : "Progress isn't being saved on this browser — export a backup.");
   backupNag();
@@ -81,7 +81,9 @@ function cardEl(card, mode, label) {
   if (label) st.label = label;
   const front = el('div', 'front');
   front.innerHTML = renderMarkdown(card.front);
-  box.append(el('div', 'topic', card.topic), el('div', `status s-${st.kind}`, st.label), front);
+  // DSA topics name the pattern ("Sliding Window"), which is the answer: show only the group until reveal.
+  const topic = mode === 'live' && card.group === 'DSA' ? card.group : card.topic;
+  box.append(el('div', 'topic', topic), el('div', `status s-${st.kind}`, st.label), front);
   return box;
 }
 
@@ -116,7 +118,7 @@ function renderLive() {
       new: 'No new cards left in the topics you have selected.',
     }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.'));
   } else {
-    box = cardEl(pick.card, 'live', newLabel(pick.queue));
+    box = cardEl(pick.card, 'live', newLabel(pick.card, pick.queue));
     box.append(...attemptEls());
   }
   $('round').textContent = pick ? `${pick.round.pos} / ${pick.round.total}` : '';
@@ -140,14 +142,13 @@ function attemptEls() {
   return [typeBtn, el('div', 'hint', 'Say your answer out loud first, then tap to check')];
 }
 
-// Today's new cards are numbered against the daily limit; ones past it are extras.
-function newLabel(queue) {
+// Today's new cards are numbered against the daily limit, in the order first met (skips included).
+function newLabel(card, queue) {
+  if (queue !== 'new' || ui.queue !== 'all') return undefined;
   const cap = store.settings().newPerDay;
-  if (queue === 'new' && ui.queue === 'all') {
-    return `New · ${cap - newLeftToday(reviews(), cards, new Date(), cap) + 1} of ${cap} today`;
-  }
-  if (queue === 'endless-new') return "New · extra, beyond today's " + cap;
-  return undefined;
+  const list = todaysNew(reviews(), cards, new Date(), history);
+  const i = list.indexOf(card.id);
+  return `New · ${i >= 0 ? i + 1 : list.length + 1} of ${cap} today`;
 }
 
 // An earlier card from this session: answer open, read-only, with a small "change grade" row.
@@ -239,6 +240,7 @@ function reveal() {
     document.activeElement?.blur();
   }
   cardBox.querySelector('.hint').replaceWith(b);
+  cardBox.querySelector('.topic').textContent = cur.card.topic;
   $('grades').hidden = false;
 }
 

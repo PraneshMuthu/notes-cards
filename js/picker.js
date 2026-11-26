@@ -6,8 +6,12 @@ const HALF_DAY = 12 * 60 * 60 * 1000;
 export const LEECH_LAPSES = 8;
 export const isLeech = (state) => (state?.lapses ?? 0) >= LEECH_LAPSES;
 
-/** Cap minus distinct cards whose first review is today (4 AM cutoff) and not endless (`x`). */
-export function newLeftToday(reviews, cards, now, newPerDay) {
+/**
+ * Today's new cards, in the order they were first met (4 AM cutoff): cards first graded today
+ * (not as an endless extra, `x`) plus never-graded cards skipped today. Skipping a new card
+ * uses its slot, so pressing Next can't pull in more than the daily limit.
+ */
+export function todaysNew(reviews, cards, now, history = []) {
   const known = new Set(cards.map((c) => c.id));
   const first = new Map();
   for (const r of reviews) {
@@ -16,9 +20,19 @@ export function newLeftToday(reviews, cards, now, newPerDay) {
     if (!p || r.t < p.t) first.set(r.c, r);
   }
   const today = dayKey(now);
-  let used = 0;
-  for (const r of first.values()) if (!r.x && dayKey(new Date(r.t)) === today) used++;
-  return Math.max(0, newPerDay - used);
+  const met = new Map();
+  for (const r of first.values()) if (!r.x && dayKey(new Date(r.t)) === today) met.set(r.c, r.t);
+  for (const h of history) {
+    if (h.skip && !h.x && known.has(h.id) && !first.has(h.id) && dayKey(new Date(h.at)) === today) {
+      met.set(h.id, Math.min(met.get(h.id) ?? Infinity, h.at));
+    }
+  }
+  return [...met].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+}
+
+/** Daily limit minus today's new cards (graded or skipped). */
+export function newLeftToday(reviews, cards, now, newPerDay, history = []) {
+  return Math.max(0, newPerDay - todaysNew(reviews, cards, now, history).length);
 }
 
 /** Grade of each card's most recent review. */
@@ -34,7 +48,7 @@ function lastGrades(reviews) {
 /** "Forgot" as the user means it: relearning, or still learning after their last grade was Forgot. */
 const isForgotten = (q, lastGrade) => q === 'relearning' || (q === 'learning' && lastGrade === 1);
 
-export function counts(cards, states, reviews, now, newPerDay) {
+export function counts(cards, states, reviews, now, newPerDay, history = []) {
   let due = 0, forgot = 0, fresh = 0;
   const lg = lastGrades(reviews);
   for (const c of cards) {
@@ -44,7 +58,7 @@ export function counts(cards, states, reviews, now, newPerDay) {
     else if (q === 'due' || ((q === 'learning' || q === 'relearning') && st.due <= now)) due++;
     if (isForgotten(q, lg.get(c.id))) forgot++;
   }
-  return { due, forgot, newLeft: Math.min(newLeftToday(reviews, cards, now, newPerDay), fresh) };
+  return { due, forgot, newLeft: Math.min(newLeftToday(reviews, cards, now, newPerDay, history), fresh) };
 }
 
 const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
@@ -126,7 +140,7 @@ function rotateTopics(fresh, cards, reviews) {
 }
 
 function buildTiers(pool, ctx, skip, holdStep = () => false) {
-  const { states, now, fsrs, filter, session, newCount, shown, cards, reviews } = ctx;
+  const { states, now, fsrs, filter, newCount, shown, cards, reviews, skippedNew } = ctx;
   const byAge = (a, b) => (shown.get(a.id) ?? 0) - (shown.get(b.id) ?? 0);
   const q = new Map(pool.map((c) => [c.id, queueOf(states.get(c.id), now)]));
   const cand = (queue) => (c) => ({ card: c, queue });
@@ -150,7 +164,8 @@ function buildTiers(pool, ctx, skip, holdStep = () => false) {
   }
   if (filter.queue === 'new') return [fresh];
 
-  const t3 = newCount > 0 ? fresh : [];
+  // Today's new cards: ones skipped earlier today keep their slot; more only while slots are left.
+  const t3 = fresh.filter((x) => skippedNew.has(x.card.id) || newCount > 0);
   // Learning/relearning cards wait for their step; showing them early would grade them early.
   const stepPending = (c) => {
     const k = q.get(c.id);
@@ -160,14 +175,13 @@ function buildTiers(pool, ctx, skip, holdStep = () => false) {
   const weak = settled.filter((c) => !skip(c))
     .map((c) => ({ card: c, queue: 'weak', r: retrievability(fsrs, states.get(c.id), now) }))
     .sort((a, b) => a.r - b.r || byAge(a.card, b.card));
-  const endlessNew = fresh.map((x) => ({ ...x, queue: 'endless-new' }));
-  // Fallback when no settled card is eligible (and, with nothing settled, no new card exists):
+  // Fallback when no settled card is eligible:
   // early steps, soonest first, rather than a repeat or an empty screen.
   const early = studied.filter((c) => stepPending(c) && !skip(c))
     .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('weak'));
-  // Old cards first; once every old card has had its turn this round, the unseen ones.
-  const t4 = session.endlessCount % 5 === 4 && endlessNew.length ? endlessNew
-    : weak.length ? weak : endlessNew.length ? endlessNew : early;
+  // After today's cards: only cards already studied, weakest first. Never-seen cards wait for
+  // tomorrow's slots (or the "New" filter), so Next never runs past today's limit.
+  const t4 = weak.length ? weak : early;
   return [t1, t2, t3, t4];
 }
 
@@ -183,11 +197,12 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
     (!filter.groups || filter.groups.has(c.group)) && (!filter.topics || filter.topics.has(c.topic)));
   if (!pool.length) return null;
 
-  const newCount = newLeftToday(reviews, cards, now, settings.newPerDay);
+  const newCount = newLeftToday(reviews, cards, now, settings.newPerDay, history);
+  const skippedNew = new Set(todaysNew(reviews, cards, now, history).filter((id) => !states.has(id)));
   const shown = new Map();
   for (const r of reviews) shown.set(r.c, Math.max(shown.get(r.c) ?? 0, r.t));
   for (const h of history) shown.set(h.id, Math.max(shown.get(h.id) ?? 0, h.at));
-  const ctx = { states, now, fsrs, filter, session, newCount, shown, cards, reviews };
+  const ctx = { states, now, fsrs, filter, session, newCount, shown, cards, reviews, skippedNew };
   const last = history.length ? history[history.length - 1].id : null;
 
   const start = roundStart ?? (history.length ? Math.min(...history.map((h) => h.at)) : now.getTime());
@@ -217,6 +232,6 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
   hit ??= pickMixed(tiers[0], undefined, session.lastGroup);
   // Position of this card in the round, e.g. 37 of 482 (1 when a new round starts).
   const pos = newRound ? 1 : pool.filter((c) => inRound.has(c.id)).length + 1;
-  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak' || hit.queue === 'endless-new', newRound,
+  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak', newRound,
     round: { pos: Math.min(pos, pool.length), total: pool.length } };
 }
