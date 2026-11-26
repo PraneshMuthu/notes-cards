@@ -126,3 +126,7 @@ Phones reconnect via the LB to other servers with jittered backoff. Session keys
 ## Traffic grows 10×. What happens in chat? {#hld04-10x}
 7M msg/s peak. Chat servers, message service and Redis shards scale horizontally, and Cassandra adds nodes.
 **Why:** storage is the real cost, ~44 PB/year, so tier history older than ~90 days to cheaper storage.
+
+## How is a 1:1 conversation_id created without a lookup or race? {#hld04-dm-id}
+Deterministically: `"dm:" + min(A,B) + ":" + max(A,B)`. Both phones compute the same id.
+**Why:** it must exist before the first message, and a deterministic id avoids creating it twice. Groups get an id from `POST /groups`.
