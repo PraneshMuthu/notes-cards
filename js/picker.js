@@ -18,14 +18,28 @@ export function newLeftToday(reviews, cards, now, newPerDay) {
   return Math.max(0, newPerDay - used);
 }
 
+/** Grade of each card's most recent review. */
+function lastGrades(reviews) {
+  const last = new Map();
+  for (const r of reviews) {
+    const p = last.get(r.c);
+    if (!p || r.t >= p.t) last.set(r.c, r);
+  }
+  return new Map([...last].map(([c, r]) => [c, r.g]));
+}
+
+/** "Forgot" as the user means it: relearning, or still learning after their last grade was Forgot. */
+const isForgotten = (q, lastGrade) => q === 'relearning' || (q === 'learning' && lastGrade === 1);
+
 export function counts(cards, states, reviews, now, newPerDay) {
   let due = 0, forgot = 0, fresh = 0;
+  const lg = lastGrades(reviews);
   for (const c of cards) {
     const st = states.get(c.id);
     const q = queueOf(st, now);
     if (q === 'new') fresh++;
     else if (q === 'due' || ((q === 'learning' || q === 'relearning') && st.due <= now)) due++;
-    if (q === 'relearning') forgot++;
+    if (isForgotten(q, lg.get(c.id))) forgot++;
   }
   return { due, forgot, newLeft: Math.min(newLeftToday(reviews, cards, now, newPerDay), fresh) };
 }
@@ -99,7 +113,8 @@ function buildTiers(pool, ctx, skip, holdStep = () => false) {
 
   if (filter.queue === 'due') return [t1, t2];
   if (filter.queue === 'forgot') {
-    return [studied.filter((c) => q.get(c.id) === 'relearning' && !skip(c))
+    const lg = lastGrades(reviews);
+    return [studied.filter((c) => isForgotten(q.get(c.id), lg.get(c.id)) && !skip(c))
       .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('relearning'))];
   }
   if (filter.queue === 'new') return [fresh];

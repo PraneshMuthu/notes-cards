@@ -78,7 +78,11 @@ function showNext() {
     $('chip').textContent = 'Notes Cards';
     const f = document.createElement('div');
     f.className = 'front';
-    f.textContent = 'No cards match this filter.';
+    f.textContent = {
+      due: 'Nothing is due right now. Cards you have learned come back here when it is time to review them; your first ones arrive tomorrow.',
+      forgot: 'No forgotten cards right now. Any card you mark Forgot shows up here until you get it right.',
+      new: 'No new cards left in the topics you have selected.',
+    }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.';
     el.append(f);
   } else {
     $('chip').textContent = pick.card.topic;

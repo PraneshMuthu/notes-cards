@@ -269,3 +269,15 @@ test('progress counts cards seen at least once, overall and per group', () => {
   assert.deepEqual(p, { seen: 1, total: 3, groups: [
     { group: 'DSA', seen: 0, total: 1 }, { group: 'HLD', seen: 1, total: 2 }] });
 });
+
+test('a new card graded Forgot shows in the Forgot view and count', () => {
+  const cards = [card('n', 'G', 'A'), card('m', 'G', 'B')];
+  const entries = [{ c: 'n', g: 1, t: ago(30 * 1000), d: '' }, { c: 'm', g: 3, t: ago(30 * 1000), d: '' }];
+  const st = states(cards, entries);
+  const p = pick({ cards, states: st, reviews: entries, filter: { queue: 'forgot' } });
+  assert.equal(p.card.id, 'n');
+  assert.equal(counts(cards, st, entries, now, 10).forgot, 1);
+  // Graded Got it afterwards: no longer counted as forgotten.
+  const later = [...entries, { c: 'n', g: 3, t: ago(10 * 1000), d: '' }];
+  assert.equal(counts(cards, states(cards, later), later, now, 10).forgot, 0);
+});

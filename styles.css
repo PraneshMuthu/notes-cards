@@ -20,7 +20,9 @@ body {
 }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
-#bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+#bar { display: flex; align-items: center; gap: 10px; padding: 16px 14px 10px; border-bottom: 1px solid var(--line); }
+/* Installed on a phone: keep the bar clear of the status-bar blur even if iOS reports no inset. */
+@media (display-mode: standalone) and (pointer: coarse) { body { padding-top: max(env(safe-area-inset-top), 44px); } }
 .chip { background: var(--code); border-radius: 999px; padding: 2px 12px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #counts { margin-left: auto; font-size: 15px; color: var(--muted); white-space: nowrap; }
 .icon-btn { background: none; border: 0; font-size: 22px; padding: 4px 8px; line-height: 1; }
