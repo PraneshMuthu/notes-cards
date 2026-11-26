@@ -1,0 +1,10 @@
+{
+  "name": "Notes Cards",
+  "short_name": "Cards",
+  "display": "standalone",
+  "start_url": "./",
+  "scope": "./",
+  "background_color": "#14161a",
+  "theme_color": "#14161a",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

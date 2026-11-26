@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<title>Notes Cards</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<header id="bar">
+  <span id="chip" class="chip">Notes Cards</span>
+  <span id="counts" aria-live="polite"></span>
+  <button id="menuBtn" class="icon-btn" aria-label="Menu">&#9776;</button>
+</header>
+<div id="banners"></div>
+<main id="stage"></main>
+<footer id="grades" hidden>
+  <button data-g="1" class="g1">Forgot</button>
+  <button data-g="2" class="g2">Hard</button>
+  <button data-g="3" class="g3">Got it</button>
+  <button data-g="4" class="g4">Easy</button>
+</footer>
+<div id="menu" hidden>
+  <div class="sheet" role="dialog" aria-label="Menu">
+    <div class="sheet-head"><strong>Menu</strong><button id="menuClose" class="icon-btn" aria-label="Close">&#10005;</button></div>
+    <h3>Show</h3>
+    <div id="queues" class="seg">
+      <label><input type="radio" name="queue" value="all" checked><span>All</span></label>
+      <label><input type="radio" name="queue" value="due"><span>Due</span></label>
+      <label><input type="radio" name="queue" value="forgot"><span>Forgot</span></label>
+      <label><input type="radio" name="queue" value="new"><span>New</span></label>
+    </div>
+    <h3>Topics</h3>
+    <div id="topics"></div>
+    <h3>New cards per day</h3>
+    <input id="newPerDay" type="number" min="0" max="200" inputmode="numeric">
+    <h3>Progress</h3>
+    <div class="row"><button id="exportBtn">Export</button><button id="importBtn">Import</button></div>
+    <input id="importFile" type="file" accept="application/json,.json" hidden>
+    <p id="msg" role="status"></p>
+  </div>
+</div>
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
