@@ -36,7 +36,7 @@ The base `calculate_shares` is concrete: validate, call the abstract `_compute_s
 **Example:** Bob owes Alice 300: `balances[bob][alice] = 300` and `balances[alice][bob] = -300`.
 
 ## Walk through `Splitwise.add_expense`. Is it a god method? {#lld03-orchestrator}
-Five steps, all delegation: resolve ids; `strategy.calculate_shares`; build `Expense`; `group.add_expense`; `record_debt` for each non-payer. No arithmetic in it.
+`Splitwise` is the facade (the single front door). Five steps, all delegation: resolve ids; `strategy.calculate_shares`; build `Expense`; `group.add_expense`; `record_debt` for each non-payer. No arithmetic.
 **Why:** orchestration is a legitimate responsibility. A line that calls belongs there. A line that computes belongs elsewhere.
 
 ## Why does `Expense` store `shares` but not the strategy? {#lld03-expense-shares}
@@ -52,14 +52,11 @@ The expense log plus the settlement log are truth. `BalanceSheet` is a derived c
 **Why:** replaying both logs into an empty `BalanceSheet` must give identical state. The demo harness asserts exactly this.
 
 ## Which relationships in Splitwise are composition, and which are not? {#lld03-relationships}
-- `Group ◆→ Expense`: composition (an expense dies with its group).
-- `Group ◇→ User`: aggregation (members outlive the group).
+- `Group ◆→ Expense`: composition (◆ = owner creates the part, part dies with it).
+- `Group ◇→ User`: aggregation (◇ = has-a, but the part outlives the owner).
 - `Expense → User`: association (stored reference).
 - `Splitwise → SplitStrategy`: dependency (parameter only).
-**Why:** the test for composition is whether the part dies when the owner is deleted. Not every field is composition.
-
-## Why a global balance sheet, not one per group? {#lld03-global-sheet}
-Debts are person-to-person, settlements can happen outside any group, and debt simplification needs the global graph.
+**Why:** test for composition: delete the owner, does the part die? Not every field is composition.
 
 ## Extension: add debt simplification, edit/undo of expenses, or balance alerts. {#lld03-extensions}
 - Simplification: a second Strategy axis (`SimplifyStrategy`) over the global balance graph.
@@ -67,9 +64,13 @@ Debts are person-to-person, settlements can happen outside any group, and debt s
 - Alerts or feed: Observer, fired inside `record_debt`.
 - Parsing "EQUAL" from an API: Factory.
 
-## Why does `Expense` not hold a back-pointer to `Group` while `Group` holds expenses? {#lld03-back-pointers}
-Keep one direction unless a real query needs the other.
-**Why:** every back-pointer is an invariant to maintain. The owner had both `Expense.group` and `Group.expenses` with no query needing both.
-
 ## Give the 60-second pitch for Splitwise. {#lld03-pitch}
 A ledger with pluggable split math. Equal, exact and percentage are Strategies behind `calculate_shares`; Template Method pins exact-sum in the base. Money is integer paise. `Splitwise` is the facade that orchestrates. The expense and settlement logs are truth, and `BalanceSheet` is a rebuildable cache.
+
+## Where should `add_expense` live, and why not on `Expense`? {#lld03-verb-on-noun}
+On `Splitwise` (orchestrates) and `Group` (stores). An operation lives on the object that owns the data it mutates and can reach every collaborator.
+**Trap:** `Expense.add_expense()`, `Group.join_group()` and `User.settle_up()` were the owner's repeat mistake. An expense cannot add itself to a group, and a user cannot see the ledger.
+
+## Is concurrency a real hazard in Splitwise? {#lld03-concurrency}
+Yes, unlike a single vending machine, because many users add expenses at once and can lose an update on a shared balance. v1 is single-threaded. Atomic or locked balance updates are the stated follow-up.
+**Why:** match the non-functional requirement to the real system.

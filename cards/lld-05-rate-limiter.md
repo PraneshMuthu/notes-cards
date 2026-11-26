@@ -8,11 +8,11 @@ Single process, multi-threaded, in-memory. One method: `allow(key) -> bool`. The
 **Why:** distributed counters are the HLD twin. A richer `Decision(allowed, remaining, retry_after)` is the first upgrade, for a real 429 with `Retry-After`.
 
 ## Which two things carry the marks in the rate limiter problem? {#lld05-two-marks}
-The algorithm choice (Strategy) and concurrency. Counting is easy. The hard part is that many threads hit one key at once.
-**Why:** the owner's first questions were all entity and config questions, and missed operations and constraints.
+The algorithm choice (Strategy) and concurrency.
+**Why:** the algorithms differ on burst behaviour and memory per key, and every request reads and writes the counter, many at once for the same key. Counting itself is easy.
 
 ## How does the rate limiter use the Strategy pattern? {#lld05-strategy}
-`RateLimiter` is a facade that reads `now` from the `Clock` and delegates to `RateLimiterStrategy.is_allowed(key, now) -> bool`. Five concretes sit behind it.
+`RateLimiter` is a facade (a thin front door) that reads `now` from the `Clock` and delegates to `RateLimiterStrategy.is_allowed(key, now) -> bool`. Five concretes sit behind it.
 **Why:** swapping the algorithm never touches `RateLimiter.allow`. This is the third Strategy rep, on an algorithmic axis.
 
 ## Compare the five rate-limit algorithms on burst behaviour and memory. {#lld05-algo-table}
@@ -21,12 +21,10 @@ The algorithm choice (Strategy) and concurrency. Counting is easy. The hard part
 | Fixed window | 2× spike | O(1) |
 | Sliding log | exact | O(N) |
 | Sliding counter | approx | O(1) |
-| Token bucket | burst up to capacity | O(1) |
+| Token bucket | burst to capacity | O(1) |
 | Leaky bucket | smoothed | O(1) |
 
-## What is the fixed window's 2× boundary burst? {#lld05-fixed-burst}
-Fixed window resets its counter at the boundary. With limit 100, send 100 at 12:00:59.9 and 100 more at 12:01:00.1: 200 requests in about 0.2 s, both "within limit".
-**Why:** the sliding variants fix this by looking at a rolling window instead.
+**Example:** fixed window, limit 100: 100 at 12:00:59.9 plus 100 at 12:01:00.1 is 200 in 0.2 s.
 
 ## How does the sliding window counter estimate, and why is it the production default? {#lld05-sliding-counter}
 `estimate = current + previous × overlap fraction`. 30 s into the minute: 20 + 90 × 0.5 = 65.
@@ -50,7 +48,7 @@ Both read 99, both decide "allowed", both write 100. Two allows where one was al
 **Why:** read, decide and write must be one critical section. Lock the decision, not just the data structure.
 **Trap:** a thread-safe dict does not help. The three steps are individually safe but not together.
 
-## Does Python's GIL make the counter safe? {#lld05-gil}
+## Does Python's GIL (Global Interpreter Lock) make the counter safe? {#lld05-gil}
 No. The GIL makes one bytecode atomic. Check-then-act is many bytecodes, and a thread switch can land between any two.
 **Why:** the GIL prevents corruption, not wrong answers. You still need the lock.
 
@@ -68,4 +66,11 @@ Hold a map of `action → strategy`, and have the caller pass a `Request` with `
 
 ## Why not Singleton for the limiter, and how does the distributed version differ? {#lld05-singleton-distributed}
 Singleton globalizes state and blocks multiple limiters (per-tenant, per-endpoint). Inject one instance.
-**Also:** distributed version: the counter moves to Redis, and the local lock becomes an atomic `INCR` or Lua script, or a distributed lock. You trade certainty for network latency and partial-failure modes.
+**Also:** distributed: the counter moves to Redis, and the local lock becomes an atomic server-side `INCR` (increment) or a Lua script (several commands run as one step), or a distributed lock. You trade certainty for network latency and failure modes.
+
+## Which algorithm would you pick, and why? {#lld05-pick}
+Say the trade-off. Spike tolerable: fixed window. Exact, low volume: sliding log. Fair and cheap (default): sliding counter. Short bursts but capped sustained rate: token bucket. Perfectly smooth downstream: leaky bucket.
+**Why:** the senior signal is "token bucket, because we tolerate bursts but bound the sustained rate", and knowing what you gave up.
+
+## Give the 60-second pitch for the rate limiter. {#lld05-pitch}
+A thread-safe single-machine limiter answering `allow(key) -> bool`. Strategy: five algorithms behind one interface. The hard part is concurrency: read-decide-write is one critical section per key, locked per key so unrelated keys run in parallel. Time is injected via `Clock` so tests need no `sleep`.

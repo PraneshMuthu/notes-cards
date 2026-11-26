@@ -11,12 +11,12 @@ Rider, Driver (location plus status), Trip lifecycle, nearest-driver matching, b
 REQUESTED → DRIVER_ASSIGNED → IN_PROGRESS → COMPLETED, plus CANCELLED. Either side can cancel before the trip starts. Once started, the only option is to end it.
 **Why:** illegal moves must raise an error, such as ending a trip that never started.
 
-## Which patterns does the ride-sharing design use? {#lld06-patterns}
-- Strategy for matching (`DriverMatchingStrategy`).
-- Strategy plus Decorator for pricing.
-- State for the trip.
-- A lock-guarded check-and-set for drivers.
-**Why:** it is the LLD twin of the HLD ride-hailing problem. The LLD is about classes and correctness in one process. The HLD is about scale.
+## Which patterns does the ride-sharing design use, and what triggers each? {#lld06-patterns}
+- Strategy for matching: the matching rule will change.
+- Strategy plus Decorator for pricing: surge stacks on any base fare.
+- State for the trip: legal moves depend on the trip status.
+- Lock-guarded check-and-set on `Driver`: two riders may grab the same driver.
+**Why:** it is the LLD twin of HLD ride-hailing. LLD is classes and correctness in one process, HLD is scale.
 
 ## Why is `TripState` a State pattern, not an if/elif on status? {#lld06-trip-state}
 Four actions × five statuses is twenty cases spread over four methods. With State, each status's rules live in one small class.
@@ -37,7 +37,7 @@ Ranking only produces candidates, and `try_assign()` is the real guard. The serv
 **Why:** locking during the scan slows every request and gains nothing. If none succeeds, cancel the trip and raise `NoDriverAvailableError`.
 
 ## Per-driver lock or one global service lock? {#lld06-lock-granularity}
-Either is correct, and you should say why. Per-driver means riders in different parts of the city never wait on each other. They only compete for the same driver. A global lock is simpler to explain.
+Either is correct, and you should say why. Per-driver is `Driver._lock`, taken inside `try_assign()`, so riders in different parts of the city never wait on each other. They only compete for the same driver. A global lock is simpler to explain.
 
 ## What is the second race on the trip itself? {#lld06-trip-race}
 The driver taps Start while the rider taps Cancel. Both see `DriverAssignedState`, so cancel frees the driver while start moves the trip to IN_PROGRESS. The driver is now AVAILABLE mid-trip and can be double-booked.
@@ -58,3 +58,14 @@ Add `vehicle_type` to `Driver` and the request. Matching filters on it, inside t
 ## Which candidates and rejections are in the pattern atlas? {#lld06-atlas}
 Candidates: Observer (notify rider on assign or arrival), more decorators (`Coupon(NightCharge(Surge(Standard)))`), Factory (pricing and matching pair per vehicle type).
 Rejected: Singleton for `RideService` (hurts tests), Template Method for pricing (formulas share no fixed steps).
+
+## What is the `DriverMatchingStrategy` seam? {#lld06-matching}
+`rank(pickup, drivers)` returns AVAILABLE drivers within the radius, closest first. Driver statuses are AVAILABLE, ON_TRIP and OFFLINE.
+**Why:** a new rule (highest-rated, geohash) is one new class and `RideService` does not change.
+
+## What happens when a trip ends? {#lld06-end-trip}
+`InProgressState.end()` computes the fare via the injected `PricingStrategy`, moves the driver to the drop point, and releases the driver back to AVAILABLE.
+**Why:** forgetting the release leaves the driver ON_TRIP forever.
+
+## Give the 60-second pitch for ride-sharing. {#lld06-pitch}
+Rider, Driver, Location and Trip, with `RideService` on top. Matching is a Strategy and pricing is a Strategy with surge as a Decorator. The trip uses State, so illegal moves raise. The race is two riders grabbing one driver, fixed by `try_assign()` under a per-driver lock. Ranking can be stale. At Uber scale, a geohash replaces the scan.

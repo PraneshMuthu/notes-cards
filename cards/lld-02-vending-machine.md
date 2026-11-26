@@ -62,3 +62,7 @@ Strategy for payment: a `PaymentStrategy`, like parking pricing. Observer for al
 ## Give the 60-second pitch for the vending machine. {#lld02-pitch}
 A vending machine is a state machine. Each mode (Idle, HasMoney, Dispensing) is a class behind `MachineState`. `VendingMachine` is the context: it holds balance, selected item and coin float, and delegates each input to `current_state`, which works and repoints the state.
 **Why:** no `if state` ladder, and a new mode is a new class.
+
+## What is the finalized scope of the vending machine? {#lld02-scope}
+Money first: insert coins or notes, then select by code. One item per transaction. Cancel gives a full refund. The operator can `restock`.
+**Why:** this is the standard interview version and the cleanest teach for State. Multi-buy with partial fulfilment, change-making limits and a fleet are stated follow-ups.

@@ -51,8 +51,16 @@ Candidates: Strategy for pricing (per seat type, surge), Observer to notify on C
 Rejected: per-seat locks, and optimistic locking (right for the distributed twin, unneeded for one in-process mutex).
 
 ## What is the distributed version of the seat lock? {#lld04-distributed-twin}
-Two shapes. A Redis key `SETNX show:seat EX 300` where the TTL is the hold expiry. Or a conditional write: `UPDATE ... SET status=BOOKED WHERE id=? AND status=AVAILABLE`, where 0 rows means someone beat you.
-**Why:** also fail closed (never double-book) and make confirm idempotent by hold token.
+Two shapes. Redis `SETNX show:seat EX 300` (SETNX = set only if absent), where the key's TTL is the hold expiry. Or a conditional write: `UPDATE ... SET status=BOOKED WHERE id=? AND status=AVAILABLE`, where 0 rows means someone beat you.
+**Also:** fail closed (never double-book) and make confirm idempotent by hold token.
 
 ## Give the 60-second pitch for BookMyShow. {#lld04-pitch}
 The only hard problem is not selling a seat twice. `Show` owns its seat map and one lock, so bookings serialize per show and different shows run in parallel. Booking is two-phase: hold with a TTL, charge outside the lock, then confirm. A token ties confirm to the right hold. Clock and payment are injected.
+
+## Do users pick specific seats or "best available N"? {#lld04-specific-seats}
+Specific seats, the harder multi-seat all-or-nothing case. "Best available N" reduces to the same hold: choose seats, then hold them.
+**Why:** all-or-nothing is why the per-show lock exists.
+
+## How do cancel and refund fit in, and what are the booking statuses? {#lld04-cancel}
+Cancel moves seats BOOKED → AVAILABLE. Refund is a one-line mention. `Booking.status` is CONFIRMED, FAILED or CANCELLED.
+**Why:** booking status tracks one purchase attempt. Seat status tracks the seat. They differ.
