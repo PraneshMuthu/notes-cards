@@ -43,22 +43,24 @@ function pickMixed(tier, avoidTopic, lastGroup) {
 }
 
 function buildTiers(pool, ctx, skip) {
-  const { states, now, fsrs, filter, session, newCount } = ctx;
+  const { states, now, fsrs, filter, session, newCount, shown } = ctx;
+  const byAge = (a, b) => (shown.get(a.id) ?? 0) - (shown.get(b.id) ?? 0);
+  const q = new Map(pool.map((c) => [c.id, queueOf(states.get(c.id), now)]));
   const cand = (queue) => (c) => ({ card: c, queue });
   const studied = pool.filter((c) => states.has(c.id));
   const fresh = pool.filter((c) => !states.has(c.id)).filter((c) => !skip(c)).map(cand('new'));
   const stepDue = studied.filter((c) => {
-    const q = queueOf(states.get(c.id), now);
-    return (q === 'learning' || q === 'relearning') && states.get(c.id).due <= now;
+    const k = q.get(c.id);
+    return (k === 'learning' || k === 'relearning') && states.get(c.id).due <= now;
   });
   const t1 = stepDue.sort((a, b) => states.get(a.id).due - states.get(b.id).due)
-    .map((c) => ({ card: c, queue: queueOf(states.get(c.id), now) }));
-  const t2 = studied.filter((c) => queueOf(states.get(c.id), now) === 'due' && !skip(c))
-    .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('due'));
+    .map((c) => ({ card: c, queue: q.get(c.id) }));
+  const t2 = studied.filter((c) => q.get(c.id) === 'due' && !skip(c))
+    .sort((a, b) => states.get(a.id).due - states.get(b.id).due || byAge(a, b)).map(cand('due'));
 
   if (filter.queue === 'due') return [t1, t2];
   if (filter.queue === 'forgot') {
-    return [studied.filter((c) => queueOf(states.get(c.id), now) === 'relearning' && !skip(c))
+    return [studied.filter((c) => q.get(c.id) === 'relearning' && !skip(c))
       .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('relearning'))];
   }
   if (filter.queue === 'new') return [fresh];
@@ -66,10 +68,10 @@ function buildTiers(pool, ctx, skip) {
   const t3 = newCount > 0 ? fresh : [];
   const weak = studied.filter((c) => !skip(c))
     .map((c) => ({ card: c, queue: 'weak', r: retrievability(fsrs, states.get(c.id), now) }))
-    .sort((a, b) => a.r - b.r);
+    .sort((a, b) => a.r - b.r || byAge(a.card, b.card));
   const endlessNew = fresh.map((x) => ({ ...x, queue: 'endless-new' }));
   const t4 = session.endlessCount % 5 === 4 && endlessNew.length ? endlessNew
-    : weak.length ? weak : endlessNew;
+    : studied.length ? weak : endlessNew;
   return [t1, t2, t3, t4];
 }
 
@@ -81,13 +83,21 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
 
   const newCount = newLeftToday(reviews, cards, now, settings.newPerDay);
   const window = Math.min(20, Math.floor(pool.length / 2));
-  const recent = new Set(history.slice(history.length - window).map((h) => h.id));
-  for (const h of history) if (now.getTime() - h.at < TEN_MIN) recent.add(h.id);
-  const ctx = { states, now, fsrs, filter, session, newCount };
+  const shown = new Map();
+  for (const r of reviews) shown.set(r.c, Math.max(shown.get(r.c) ?? 0, r.t));
+  for (const h of history) shown.set(h.id, Math.max(shown.get(h.id) ?? 0, h.at));
+  const ctx = { states, now, fsrs, filter, session, newCount, shown };
+  const last = history.length ? history[history.length - 1].id : null;
+  const counted = history.slice(history.length - window).map((h) => h.id);
+  const timed = history.filter((h) => now.getTime() - h.at < TEN_MIN).map((h) => h.id);
 
-  // T1 cards (step due) are exempt from exclusion inside buildTiers.
-  let tiers = buildTiers(pool, ctx, (c) => recent.has(c.id));
-  if (!tiers.some((t) => t.length)) tiers = buildTiers(pool, ctx, () => false);
+  // Stepwise relaxation: full exclusion, count window only, last shown only, nothing.
+  // (T1 cards whose step is due are exempt inside buildTiers.)
+  let tiers = [];
+  for (const ex of [new Set([...counted, ...timed]), new Set(counted), new Set([last]), new Set()]) {
+    tiers = buildTiers(pool, ctx, (c) => ex.has(c.id));
+    if (tiers.some((t) => t.length)) break;
+  }
   tiers = tiers.filter((t) => t.length);
   if (!tiers.length) return null;
 

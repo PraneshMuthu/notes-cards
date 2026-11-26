@@ -39,7 +39,7 @@ test('relearning before due before new', () => {
 test('never same topic back-to-back when another exists', () => {
   const cards = [card('a1', 'G', 'A'), card('a2', 'G', 'A'), card('a3', 'G', 'A'), card('b1', 'G', 'B')];
   const entries = [...graduated('a1', 40), ...graduated('a2', 30), ...graduated('a3', 20), ...graduated('b1', 10)];
-  const history = [{ id: 'zz', at: ago(60 * MIN) }, { id: 'a1', at: ago(30 * MIN) }].map((h) => h);
+  const history = [{ id: 'zz', at: ago(60 * MIN) }, { id: 'a1', at: ago(30 * MIN) }];
   const r = pick({ cards: [...cards, card('zz', 'G', 'A')], states: states(cards, entries), reviews: entries, history });
   assert.equal(r.card.id, 'b1');
 });
@@ -170,4 +170,45 @@ test('counts', () => {
   const entries = [...graduated('d', 30), ...graduated('r', 30), { c: 'r', g: 1, t: ago(60 * MIN), d: '' }];
   const c = counts(cards, states(cards, entries), entries, now, 10);
   assert.deepEqual(c, { due: 2, forgot: 1, newLeft: 1 });
+});
+
+test('small deck rotates: no back-to-back repeats, all cards seen', () => {
+  const cards = [card('a', 'G', 'T'), card('b', 'G', 'T'), card('c', 'G', 'T')];
+  const reviews = [], history = [], seen = {};
+  let prev = null;
+  for (let i = 0; i < 30; i++) {
+    const t = new Date(now.getTime() + i * MIN);
+    const r = pickNext({ cards, states: replay(reviews, f, new Set(['a', 'b', 'c'])), reviews, history,
+      now: t, fsrs: f, filter: filterAll, settings, session: { endlessCount: 0 } });
+    assert.notEqual(r.card.id, prev, `repeat at pick ${i}`);
+    prev = r.card.id;
+    seen[prev] = (seen[prev] ?? 0) + 1;
+    history.push({ id: prev, at: t.getTime() });
+    reviews.push({ c: prev, g: 3, t: t.getTime(), d: '' });
+  }
+  for (const id of ['a', 'b', 'c']) assert.ok(seen[id] >= 8, `${id} seen ${seen[id]}`);
+});
+
+test('endless: new cards only on every 5th pick, never bypass cap', () => {
+  const cards = Array.from({ length: 6 }, (_, i) => card(`c${i}`, 'G', `t${i}`));
+  // Two capped new cards were first-reviewed today (graduated far into the future via Easy).
+  const reviews = ['c0', 'c1'].flatMap((id, i) => [
+    { c: id, g: 4, t: new Date(2026, 2, 10, 9, i).getTime(), d: '' },
+    { c: id, g: 4, t: new Date(2026, 2, 10, 9, i, 30).getTime() + 10 * MIN, d: '' },
+  ]);
+  const st = states(cards, reviews);
+  assert.equal(newLeftToday(reviews, cards, now, 2), 0);
+  const history = [];
+  for (let n = 0; n < 5; n++) {
+    const r = pick({ cards, states: st, reviews, history, settings: { newPerDay: 2 }, session: { endlessCount: n } });
+    if (n < 4) { assert.equal(r.queue, 'weak', `pick ${n}`); history.push({ id: r.card.id, at: now.getTime() }); }
+    else assert.equal(r.queue, 'endless-new');
+  }
+});
+
+test('three groups: round-robin starts after preset lastGroup', () => {
+  const cards = [card('a', 'A', 't1'), card('b', 'B', 't2'), card('c', 'C', 't3')];
+  const r = pick({ cards, session: { endlessCount: 0, lastGroup: 'B' } });
+  assert.equal(r.card.group, 'C');
+  assert.equal(pick({ cards, session: { endlessCount: 0, lastGroup: 'C' } }).card.group, 'A');
 });
