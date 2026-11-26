@@ -42,13 +42,39 @@ function pickMixed(tier, avoidTopic, lastGroup) {
   return null;
 }
 
+// Order new cards so each group rotates through its topics (file order, wrapping),
+// starting after the topic most recently introduced from that group (derived from reviews).
+function rotateTopics(fresh, cards, reviews) {
+  const topics = new Map(), byId = new Map(cards.map((c) => [c.id, c]));
+  for (const c of cards) {
+    if (!topics.has(c.group)) topics.set(c.group, []);
+    if (!topics.get(c.group).includes(c.topic)) topics.get(c.group).push(c.topic);
+  }
+  const first = new Map();
+  for (const r of reviews) {
+    if (byId.has(r.c) && (!first.has(r.c) || r.t < first.get(r.c))) first.set(r.c, r.t);
+  }
+  const latest = new Map(); // group -> [time, topic]
+  for (const [id, t] of first) {
+    const c = byId.get(id);
+    if (!latest.has(c.group) || t > latest.get(c.group)[0]) latest.set(c.group, [t, c.topic]);
+  }
+  const rank = (c) => {
+    const list = topics.get(c.group), last = latest.get(c.group)?.[1];
+    const i = list.indexOf(c.topic), l = last === undefined ? -1 : list.indexOf(last);
+    return (i - l - 1 + list.length) % list.length;
+  };
+  return fresh.map((x) => ({ x, r: rank(x.card) })).sort((a, b) => a.r - b.r).map((e) => e.x);
+}
+
 function buildTiers(pool, ctx, skip) {
-  const { states, now, fsrs, filter, session, newCount, shown } = ctx;
+  const { states, now, fsrs, filter, session, newCount, shown, cards, reviews } = ctx;
   const byAge = (a, b) => (shown.get(a.id) ?? 0) - (shown.get(b.id) ?? 0);
   const q = new Map(pool.map((c) => [c.id, queueOf(states.get(c.id), now)]));
   const cand = (queue) => (c) => ({ card: c, queue });
   const studied = pool.filter((c) => states.has(c.id));
-  const fresh = pool.filter((c) => !states.has(c.id)).filter((c) => !skip(c)).map(cand('new'));
+  const fresh = rotateTopics(
+    pool.filter((c) => !states.has(c.id)).filter((c) => !skip(c)).map(cand('new')), cards, reviews);
   const stepDue = studied.filter((c) => {
     const k = q.get(c.id);
     return (k === 'learning' || k === 'relearning') && states.get(c.id).due <= now;
@@ -86,7 +112,7 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
   const shown = new Map();
   for (const r of reviews) shown.set(r.c, Math.max(shown.get(r.c) ?? 0, r.t));
   for (const h of history) shown.set(h.id, Math.max(shown.get(h.id) ?? 0, h.at));
-  const ctx = { states, now, fsrs, filter, session, newCount, shown };
+  const ctx = { states, now, fsrs, filter, session, newCount, shown, cards, reviews };
   const last = history.length ? history[history.length - 1].id : null;
   const counted = history.slice(history.length - window).map((h) => h.id);
   const timed = history.filter((h) => now.getTime() - h.at < TEN_MIN).map((h) => h.id);

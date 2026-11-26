@@ -212,3 +212,19 @@ test('three groups: round-robin starts after preset lastGroup', () => {
   assert.equal(r.card.group, 'C');
   assert.equal(pick({ cards, session: { endlessCount: 0, lastGroup: 'C' } }).card.group, 'A');
 });
+
+test('new cards rotate across topics within a group', () => {
+  const cards = [];
+  for (const t of ['T1', 'T2', 'T3']) for (let i = 0; i < 3; i++) cards.push(card(`${t}-${i}`, 'G', t));
+  const reviews = [], picked = [];
+  for (let i = 0; i < 6; i++) {
+    const t = new Date(now.getTime() + i * MIN);
+    const r = pickNext({ cards, states: replay(reviews, f, new Set(cards.map((c) => c.id))), reviews, history: [],
+      now: t, fsrs: f, filter: filterAll, settings: { newPerDay: 6 }, session: { endlessCount: 0 } });
+    picked.push(r.card);
+    reviews.push({ c: r.card.id, g: 3, t: t.getTime(), d: '' });
+  }
+  assert.deepEqual(picked.slice(0, 3).map((c) => c.topic), ['T1', 'T2', 'T3']);
+  assert.deepEqual(picked.slice(3).map((c) => c.topic), ['T1', 'T2', 'T3']);
+  assert.equal(new Set(picked.map((c) => c.id)).size, 6);
+});
