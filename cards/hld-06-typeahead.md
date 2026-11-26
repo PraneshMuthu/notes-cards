@@ -4,8 +4,8 @@ group: HLD
 ---
 
 ## What do you clarify before designing search autocomplete? {#hld06-scope}
-Prefix-only matching, top 5 suggestions ranked by how often the full query was searched, same for everyone, English only, daily or weekly freshness is fine, under 100 ms end-to-end.
-**Why:** "no personalisation, no spell-correction, no real-time trending" is what allows a precomputed, read-only structure.
+Prefix-only matching, top 5 suggestions ranked by how often the full query was searched, same for everyone, English lowercase only, daily or weekly freshness is fine, under 100 ms end-to-end.
+**Why:** "no personalisation, no spell-correction, no real-time trending" is what allows a precomputed, read-only structure. Under 100 ms (p99, the slowest 1% of requests) because the user has typed the next letter otherwise; the server lookup itself is only ~10 ms.
 **Example:** typing "din" suggests "dinner recipes" but not "sunday dinner" (no mid-word matching).
 
 ## How many requests per second does typeahead get, and why is it not just searches per second? {#hld06-qps}
@@ -15,7 +15,7 @@ Roughly 23K/s average and 50K/s at peak, because one search fires a request on a
 
 ## How big is the trie and what does that decide? {#hld06-trie-size}
 About 10 GB, so it fits in one machine's RAM and every server holds a full copy (no sharding yet).
-**Why:** 10M kept queries × 20 chars = 200M chars × ~0.5 (shared prefixes) ≈ 100M nodes × ~100 B per node ≈ 10 GB. A trie (prefix tree) has one character per edge, so every path from the root spells a prefix.
+**Why:** 10M kept queries × 20 chars = 200M chars × ~0.5 (shared prefixes) ≈ 100M nodes × ~100 B per node (child pointers plus the 40 B top-5 list) ≈ 10 GB. A trie (prefix tree) has one character per edge, so every path from the root spells a prefix.
 **Example:** all queries starting with "din" sit under the node reached by d → i → n.
 
 ## Why is plain SQL `LIKE 'din%' ORDER BY count DESC LIMIT 5` not enough? {#hld06-why-not-sql}
@@ -34,7 +34,7 @@ Store each top-5 as 8-byte query IDs into one shared string table, and keep only
 ## How is the top-5 for 100M nodes computed? {#hld06-bottom-up}
 Bottom-up, once, in the offline builder. A leaf's top-5 is itself; a parent merges its own count with each child's top-5 and keeps the best 5.
 **Why:** each node merges a few small lists, so the whole build is minutes on one machine and costs nothing at request time.
-**Example:** also cap prefix depth at ~30 chars, because almost nobody needs suggestions that far in.
+**Trap:** without a depth cap, long queries explode the node count. Cap depth at ~30 chars and return nothing for longer prefixes.
 
 ## Why rebuild the trie offline instead of updating counts on every search? {#hld06-offline-rebuild}
 One count bump ripples to every ancestor's top-5 (up to ~14 nodes), needing locks while reads hit them. Nobody needs real-time anyway.
@@ -42,7 +42,7 @@ One count bump ripples to every ancestor's top-5 (up to ~14 nodes), needing lock
 **Trap:** do not propose live updates when the interviewer said daily or weekly freshness is fine.
 
 ## Describe the typeahead data pipeline from search to live trie. {#hld06-pipeline}
-Search service emits `{query, ts}` to Kafka, batches go to S3 partitioned by date, a daily or weekly Spark job counts queries, then a builder drops the long tail and blocklisted terms, builds the trie and saves a versioned snapshot to S3. Servers load it and swap.
+Search service emits `{query, ts}` to Kafka (a durable message queue), batches land in S3 (object storage) partitioned by date, a daily or weekly Spark job (batch compute) lowercases, trims and counts queries, then a builder drops the long tail and blocklisted terms, builds the trie and saves a versioned snapshot. Servers load it and swap.
 **Why:** logs are append-only and only batch-read, so cheap object storage beats a database. Date partitions let the job read just the last 7 days (70 GB).
 
 ## How do you stop last year's popular queries dominating forever? {#hld06-recency}

@@ -4,7 +4,7 @@ group: HLD
 ---
 
 ## What do you clarify for a distributed key-value store, and which answer shapes the design? {#hld10-scope}
-Only get/put/delete by exact key, values under 10 KB (~1 KB typical), ~100 TB, ~100K ops/s at 50/50 read/write, p99 under 10 ms. The big one: on a network split, stay available or refuse? Here: stay available, with tunable consistency.
+Only get/put/delete by exact key, values under 10 KB (~1 KB typical), ~100 TB, ~100K ops/s at 50/50 read/write, p99 under 10 ms. The big one: on a network split, stay available or refuse? Here: stay available, with tunable consistency (the caller picks per request how many replicas must answer).
 **Example:** a shopping cart. A failed "add to cart" loses money; a duplicate item is a small annoyance.
 
 ## Explain CAP in plain words and which side this store picks. {#hld10-cap}
@@ -17,9 +17,8 @@ When the network splits (Partition), each side must either refuse requests (Cons
 **Why:** traffic is 50K reads × 2 (quorum R=2) + 50K writes × 3 (N=3) = 250K replica-ops/s ÷ 75 ≈ 3.3K per node, far below an SSD's 10-20K. Fill only to 50% because compaction needs free space.
 
 ## How do you partition and replicate keys? {#hld10-ring}
-Consistent hashing: hash the key to a point on a ring, walk clockwise to the first node, then store on the first N=3 distinct physical nodes (the preference list). Each node has many virtual nodes (~256 in the doc, Cassandra 4.0 default 16).
-**Why:** adding node 76 moves ~1/76 of data, not nearly all as `hash % 75` would. Virtual nodes make a new node pull small slices from many peers.
-**Example:** any node can coordinate a request, so there is no leader and no single point of failure.
+Consistent hashing: hash the key to a point on a ring, walk clockwise to the first node, then store on the first N=3 distinct physical nodes (the preference list). Each physical node owns many virtual nodes (ring positions). Any node can be the coordinator: the node that receives the client request and fans it out.
+**Why:** adding node 76 moves ~1/76 of data, not nearly all as `hash % 75` would. Virtual nodes make a new node pull small slices from many peers, and there is no leader to fail.
 
 ## Why a leaderless Dynamo/Cassandra design and not sharded Postgres? {#hld10-why-not-postgres}
 Postgres has one leader per shard, so writes pause during failover (CP). We need writes to succeed on any 2 of 3 replicas and an append-only engine for 50K writes/s.
@@ -27,7 +26,8 @@ Postgres has one leader per shard, so writes pause during failover (CP). We need
 
 ## Explain W + R > N with numbers. {#hld10-quorum}
 N=3 copies, write waits for W=2, read asks R=2. Two groups of 2 from 3 nodes must share a node (2+2=4 > 3), so a read always touches a replica with the latest write.
-**Example:** put x=5 lands on A,B (D still has 4). A read of B,D sees 5 and 4, returns 5 (newer) and read-repairs D.
+**Example:** replicas are A, B, D. put x=5 lands on A,B (D still has 4). A read of B,D sees 5 and 4, returns 5 (newer) and read-repairs D: the reader notices the stale copy and writes the newer value back.
+**Trap:** this is not full strong consistency. Sloppy quorums, concurrent writes and last-write-wins clock skew can still return stale or lost data.
 
 ## What does the consistency dial look like (N=3)? {#hld10-dial}
 | Setting | W+R>N | Behaviour |
@@ -66,7 +66,7 @@ Merkle-tree repair: hash each bucket of keys, then hash pairs of hashes up to on
 
 ## Why an LSM tree instead of a B-tree for storage? {#hld10-lsm}
 A B-tree updates pages in place, so each write is a random seek. An LSM (log-structured merge) tree turns every write into a sequential append. With 50% writes this wins.
-**Why:** write path: append to commit log (crash recovery only), insert into the in-memory memtable and ack, flush at ~128 MB to an immutable SSTable (sorted file), then compact in the background. Used by Cassandra, RocksDB and HBase.
+**Why:** write path: append to the commit log (crash recovery only), insert into the in-memory memtable and ack, flush at ~128 MB to an immutable SSTable (sorted file), then compaction (background merging of SSTables, keeping the newest version of each key) shrinks the file count. Used by Cassandra, RocksDB and HBase.
 
 ## How does a delete work in an immutable-file store? {#hld10-tombstone}
 Write a tombstone, a "deleted at time T" marker. Reads that find it return not found. Compaction drops it only after a grace period (~10 days).
@@ -81,5 +81,9 @@ Check the memtable, then each SSTable newest first. A bloom filter is a small bi
 With N=3, QUORUM (2) survives one node down while still overlapping. With N=2, quorum is 2, so any failure blocks writes. N=5 needs 500 TB raw (67% more) for rare benefit.
 
 ## Give the 30-second pitch for the key-value store. {#hld10-pitch}
-A Dynamo-style leaderless store, essentially Cassandra: 100 TB × 3 replicas = 300 TB ÷ 4 TB per node = 75 nodes, ~3.3K ops/s each. Consistent hashing with vnodes, N=3, any node coordinates, AP with W=2, R=2 and LWW.
+A Dynamo-style leaderless store, essentially Cassandra: 100 TB × 3 replicas = 300 TB ÷ 4 TB per node = 75 nodes, ~3.3K ops/s each. Consistent hashing with vnodes, N=3, any node coordinates, AP with W=2, R=2 and last-write-wins.
 **Why:** gossip detects failures, hinted handoff covers short outages, Merkle repair fixes drift, and an LSM engine (commit log, memtable, SSTables, bloom filters) makes writes sequential.
+
+## What is read-repair? {#hld10-read-repair}
+During a quorum read, if the replicas disagree, the coordinator returns the newest version and writes it back to the stale replica.
+**Why:** it heals hot keys for free, with no separate job. Rarely-read keys still need hinted handoff or Merkle repair.

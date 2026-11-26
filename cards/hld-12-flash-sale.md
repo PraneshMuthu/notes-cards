@@ -16,21 +16,24 @@ Each `UPDATE stock = stock - 1` holds the row lock ~5 ms (update + commit + fsyn
 **Why:** selling 10,000 would take 50 s while 500K req/s pile up. Redis `DECR` does ~100K ops/s on one key (single-threaded, in memory, no disk), so 10,000 sells in ~0.1 s.
 
 ## Why does the buy path use a Lua script instead of plain `DECR`? {#hld12-lua}
-Plain `DECR` can go negative and does not stop one user buying twice. A Lua script runs as one indivisible step in Redis: if user in `buyers` return -1; if stock ≤ 0 return 0; else `DECR`, `SADD`, return 1.
+Plain `DECR` can go negative and does not stop one user buying twice. A Lua script (a small program Redis runs as one uninterruptible step) does: if user in `buyers` return -1; if stock ≤ 0 return 0; else `DECR`, `SADD`, return 1.
 **Why:** check and decrement must be atomic, or two users both read 1 and both buy.
 **Trap:** `GET stock` then `DECR` in app code oversells.
 
-## What is the architecture in one line per layer? {#hld12-layers}
-CDN (page + `status.json`), waiting room (signed ticket), API gateway (rate limit, ticket check, sold-out flag), Buy service + Redis (atomic stock), Kafka → Order service → Postgres (async order write).
+## What are the five layers of the flash-sale design? {#hld12-layers}
+1. CDN (Content Delivery Network, edge caches): page + `status.json`
+2. Waiting room: signed ticket
+3. API gateway: rate limit, ticket check, sold-out flag
+4. Buy service + Redis: atomic stock
+5. Kafka (durable message queue) → Order service → Postgres: async order write
 **Why:** each layer is cheaper than the next. Only ~10K/s reach Redis and only 10,000 winners reach Postgres.
-**Example:** CDN = Content Delivery Network, servers near users that cache static files.
 
 ## Why can only a CDN serve the product page? {#hld12-cdn}
 5M users × 500 KB page = 2.5 TB. Over 60 s that is ~42 GB/s ≈ 330 Gbps, more than any origin has.
 **Why:** the page and a tiny `status.json` ("now serving", "sold out") are cached at the edge with a ~1 s TTL, so they cost the origin almost nothing.
 
 ## How does the waiting room work and why is it fair? {#hld12-waiting-room}
-Joining (CAPTCHA + login) returns a signed ticket with a random number `r` in [0, 1). An admitter raises `nowServing` in `status.json`; only users with `r < nowServing` may call Buy. Joiners before noon all get random `r`, so it is a lottery. Late joiners get `r = 1 + seconds_late`.
+Joining (login + CAPTCHA, a bot-check puzzle) returns a signed ticket with a random number `r` in [0, 1). An admitter raises `nowServing` in `status.json`; only users with `r < nowServing` may call Buy. Joiners before noon all get random `r`, so it is a lottery. Late joiners get `r = 1 + seconds_late`.
 **Why:** first-come-first-served rewards bots with millisecond latency. One verified account = one ticket.
 **Example:** a bank token-number system with a "now serving" screen.
 
@@ -47,7 +50,7 @@ Load shedding (deliberately refusing work to protect the system). The Buy servic
 **Why:** after 12:00:02 every request is a loser.
 
 ## How do you avoid a thundering herd at exactly 12:00:00? {#hld12-herd}
-The countdown only enables the button; clicks reach the gateway only if the ticket is called. Status polls get ±1 s jitter. The CDN collapses identical requests.
+The countdown only enables the button; clicks reach the gateway only if the ticket is called. Status polls get ±1 s jitter. The CDN collapses identical requests into one fetch to origin (request collapsing).
 **Why:** 5M clients polling every 2 s = 2.5M polls/s become ~1 origin fetch/s per edge location.
 
 ## Why create the order through Kafka instead of writing Postgres directly? {#hld12-kafka}
@@ -56,7 +59,7 @@ Postgres could handle ~2K writes/s, but Kafka decouples: if Postgres hiccups, wi
 **Example:** total volume is only 10,000 × ~1 KB = 10 MB.
 
 ## How do you enforce one phone per user? {#hld12-one-per-user}
-Three layers: the Lua script's `buyers` SET returns -1 for a repeat, the Idempotency-Key returns the same `reservationId`, and Postgres `UNIQUE(sale_id, user_id)` is the final guard.
+Three layers: the Lua script's `buyers` SET returns -1 for a repeat, the Idempotency-Key (a unique id per buy attempt, so retries return the same result) returns the same `reservationId`, and Postgres `UNIQUE(sale_id, user_id)` is the final guard.
 **Why:** each layer catches what slips through the one before.
 
 ## The Redis primary dies at 12:00:01. How do you avoid overselling? {#hld12-failover}
@@ -69,7 +72,7 @@ Yes: you under-sell by one, which is the safe direction. A reconcile job (Redis 
 **Trap:** a healthy win is briefly in Redis but not yet Postgres (still in Kafka). The reconciler must only count buyers older than ~1 min or wait for lag 0, or it returns phones that were really sold.
 
 ## How does reservation expiry return unpaid phones? {#hld12-expiry}
-A sweeper every 30 s runs `UPDATE orders SET status='EXPIRED' WHERE status='RESERVED' AND expires_at < now() RETURNING reservation_id`, then `INCR stock` per row and clears `soldOut` if stock was 0.
+An expiry sweeper (a background job) runs every 30 s: `UPDATE orders SET status='EXPIRED' WHERE status='RESERVED' AND expires_at < now() RETURNING reservation_id`, then `INCR stock` per row and clears `soldOut` if stock was 0.
 **Why:** expect ~20% unpaid, so ~2,000 phones return around 12:10 for a second wave.
 **Example:** a DB row with `expires_at` is reliable; Redis key-expiry events are fire-and-forget and can be lost.
 
@@ -79,9 +82,18 @@ Both use a conditional update on `status='RESERVED'`. Postgres serializes them: 
 **Trap:** a naive expiry without `WHERE status='RESERVED'` races with payment.
 
 ## What if the sale grows to 100K phones and one Redis key is hot? {#hld12-hot-key}
-Split stock into N buckets (`stock:{s42}:0..9`, 10,000 each) on different nodes, and route users by `hash(userId) % N`, with a "try another bucket" when yours is empty. Not needed for 10K.
-**Why:** one Redis key is one node, ~100K ops/s max. Keys use a hash tag `{s42}` so one Lua script can touch them together.
+Split stock into N buckets (`stock:{s42-0}` ... `{s42-9}`, 10,000 each), route users by `hash(userId) % N`, with a "try another bucket" when yours is empty. Not needed for 10K.
+**Why:** one key lives on one node (~100K ops/s max). A Redis Cluster hash tag (the `{...}` part) forces keys with the same tag onto the same node, so each bucket needs its own tag to spread across nodes. A Lua script then touches only its own bucket's `stock` and `buyers` keys.
+**Trap:** reusing `{s42}` for all buckets would put them back on one node.
 
 ## Give the 30-second pitch for the flash sale. {#hld12-pitch}
 5M users for 10,000 phones, so reject 99.8% cheaply. CDN serves the page and a status file; a waiting room gives signed tickets with a random number (fair lottery) and an admitter lets ~10K users/s through.
 **Why:** one Lua script on Redis does atomic check-and-decrement (100K ops/s vs 200/s for a DB row). Winners go via Kafka to Postgres, a sweeper returns unpaid stock, and sold out is a flag on the CDN. After a Redis failover, rebuild from Postgres.
+
+## How does the payment step work after RESERVED? {#hld12-payment}
+The winner pays within 10 minutes via the payment service. On success: `UPDATE orders SET status='PAID' WHERE id=? AND status='RESERVED'`. The payment page reads `GET /orders/{id}` and retries briefly if the row is not there yet (Kafka lag, ~ms).
+**Why:** the same conditional update is what makes payment and expiry safe against each other.
+
+## What do you prepare before the sale starts? {#hld12-prewarm}
+Push the page and images to the CDN, and at 11:55 an ops job sets `stock:{s42}` to 10000 and clears `buyers:{s42}`. Users join the waiting room before noon.
+**Why:** Redis starts correct and the spike meets warm caches, not a cold origin.

@@ -4,12 +4,12 @@ group: HLD
 ---
 
 ## Define UPI, NPCI, PSP bank and wallet for this design. {#hld11-jargon}
-UPI (Unified Payments Interface) is India's real-time bank-to-bank payment network. NPCI runs the UPI switch every payment passes through. A PSP (Payment Service Provider) bank is the partner bank our app calls to reach UPI. A wallet is money we hold for the user (a PPI, prepaid payment instrument), so moving it is just a DB update.
-**Example:** pay `ravi@okaxis` from a bank account: our app → PSP bank → NPCI → payer's bank and payee's bank.
+UPI (Unified Payments Interface) is India's real-time bank-to-bank payment network. NPCI (National Payments Corporation of India) runs the UPI switch every payment passes through. A PSP (Payment Service Provider) bank is the partner bank our app calls to reach UPI. A wallet is money we hold for the user (a PPI, prepaid payment instrument), so moving it is just a DB update.
+**Example:** pay `ravi@okaxis` from a bank account: our app → PSP bank → NPCI → payer's bank and payee's bank. The UPI PIN is entered in NPCI's secure library and checked by the user's bank; our app never sees it.
 
 ## Payments system: do you favour correctness or availability, and why? {#hld11-correctness}
 Correctness. Never double-debit, never lose a rupee, every paisa traceable.
-**Why:** a failed payment is cheap because the user retries. A double charge or lost money means regulator trouble and lost trust. Wallet balance needs strong ACID consistency.
+**Why:** a failed payment is cheap because the user retries. A double charge or lost money means regulator (RBI, India's central bank) trouble and lost trust. Wallet balance needs ACID (all-or-nothing, isolated transactions) consistency.
 **Trap:** do not pitch NoSQL "for scale" and lose multi-row transactions.
 
 ## How many payments per second, and how many DB shards? {#hld11-capacity}
@@ -49,36 +49,40 @@ Make check and write one atomic statement: `UPDATE wallets SET balance_paise = b
 **Trap:** SELECT ... FOR UPDATE also works but holds the lock longer. Optimistic locking (a `version` column) suits rare conflicts.
 
 ## What does a full wallet-to-wallet transaction contain? {#hld11-txn}
-One DB transaction: conditional debit (0 rows means rollback), credit, insert the 2 ledger rows, set the payment to SUCCESS `WHERE status='PENDING'`. Commit.
-**Why:** all-or-nothing, so a crash midway rolls back everything. Lock rows in a fixed order (smaller user_id first) so two opposite transfers cannot deadlock.
+One DB transaction: conditional debit of the payer (0 rows means rollback), credit of the payee, insert the 2 ledger rows, set the payment to SUCCESS `WHERE status='PENDING'`. Commit.
+**Why:** all-or-nothing, so a crash midway rolls back everything.
+**Trap:** two opposite transfers (A→B and B→A) can deadlock. Issue the two balance updates in a fixed order, smaller user_id first, whichever is the payer.
 
 ## The PSP bank does not answer for 10 s. Did the user get charged? {#hld11-timeout}
 Unknown, so the payment stays PENDING. Never mark it FAILED (the user retries and pays twice) or SUCCESS.
-**Why:** the debit may have happened and the reply been lost. Resolve in three layers: webhook, status polling with the same `payment_id`, then nightly reconciliation.
+**Why:** the debit may have happened and the reply been lost. Resolve in three layers: webhook (the bank calls our URL with the final result), status polling with the same `payment_id`, then nightly reconciliation.
 
-## What limits apply when polling the bank for a stuck payment? {#hld11-polling}
-A poller queries the PSP with the same `payment_id` (a query, not a new payment). NPCI's Apr 2025 circular: first check no earlier than 90 s, at most 3 checks in 2 hours, then the settlement file decides. Leftovers go to a dead-letter queue for ops.
-**Why:** status-check storms caused UPI outages. At ~0.1% unknown (133K/day ≈ 1.5/s) the load is tiny.
+## How do you poll the bank for a stuck payment? {#hld11-polling}
+A poller queries the PSP with the same `payment_id` (a query, not a new payment). NPCI limits status checks: wait about 90 s before the first and make only a few per payment. Leftovers go to a dead-letter queue (a parking list for ops to handle by hand).
+**Why:** status-check storms caused UPI outages. At ~0.1% unknown (133K/day ≈ 1.5/s) the load is tiny. The exact limits come from the source doc's reading of the NPCI circular; verify before quoting.
 
 ## What is reconciliation and what does it do? {#hld11-recon}
-Nightly, compare the bank's settlement file (every transaction it processed, with amount and RRN) against our `payments` and ledger.
-**Why:** it is the final safety net. Our PENDING vs bank SUCCESS: mark SUCCESS. Ours PENDING/FAILED vs bank absent or FAILED: mark FAILED and refund by reversing entry. Ours SUCCESS vs bank absent, or amount mismatch: flag to ops.
-**Example:** RRN = the bank's reference number for the transaction.
+Nightly, compare the bank's settlement file (every transaction it processed, with amount and RRN, the bank's reference number) against our `payments` and ledger.
+**Why:** it is the final safety net. Three outcomes: we say PENDING, bank says SUCCESS: mark SUCCESS. We say PENDING/FAILED, bank absent or FAILED: mark FAILED and refund by reversing entry. We say SUCCESS but bank absent, or amounts differ: flag to ops.
 
 ## How long can a UPI payment stay pending? {#hld11-t1}
 Usually minutes. Worst case the user sees "pending, auto-reversed if it fails". RBI's rule: a failed UPI transfer must be reversed by T+1 (next working day), else the bank pays the user ₹100/day.
 
 ## Payer and payee are on different DB shards. How do you transfer? {#hld11-saga}
-Use a saga driven by the state machine: debit Asha on shard A (extra state `DEBITED`), then credit Ravi on shard B using `payment_id` as the idempotency key, retrying until it succeeds. If it permanently fails, a compensating credit refunds Asha.
-**Why:** 2PC blocks if the coordinator dies; saga steps are idempotent and retryable.
+Use a saga (a chain of local steps with undo steps) driven by the state machine: debit Asha on shard A (extra state `DEBITED`), then credit Ravi on shard B using `payment_id` as the idempotency key, retrying until it succeeds. If it permanently fails, a compensating credit refunds Asha.
+**Why:** 2PC (two-phase commit, all shards vote then commit) blocks if the coordinator dies; saga steps are idempotent and retryable.
 
 ## A big merchant receives 1,000 payments/s. How do you avoid a hot row? {#hld11-hot-wallet}
 Do not update the merchant's balance row per payment. Insert CREDIT ledger rows (inserts do not contend) and roll them into the balance every few seconds.
 **Why:** otherwise every credit queues on one row lock. Merchants do not need a to-the-paisa live balance.
 
 ## The PSP bank is down, or the webhook arrives twice. What happens? {#hld11-psp-failures}
-Bank down: a circuit breaker fails new UPI payments fast ("bank unavailable") while wallet payments keep working. Many apps route to a second PSP bank. Duplicate or early webhook: the handler does `UPDATE ... WHERE status='PENDING'`, so the first wins and the rest are no-ops.
+Bank down: a circuit breaker (stops calling a failing service and fails fast) rejects new UPI payments with "bank unavailable" while wallet payments keep working. Many apps route to a second PSP bank. Duplicate or early webhook: the handler does `UPDATE ... WHERE status='PENDING'`, so the first wins and the rest are no-ops.
 
 ## Give the 30-second pitch for the payment system. {#hld11-pitch}
 Scale is modest (~8K tx/s peak), so correctness is the game. Client idempotency key + UNIQUE index gives an exactly-once effect, and each payment walks CREATED → PENDING → SUCCESS/FAILED.
 **Why:** wallet money is in Postgres sharded by user, with one ACID txn doing a conditional debit, credit and 2 ledger rows. UPI goes through the PSP bank; on timeout stay PENDING until webhook, poll or nightly reconciliation.
+
+## How are refunds and reversals recorded? {#hld11-refund}
+Never edit or delete ledger rows. A refund is a new reversing entry (credit back what was debited), so the ledger stays a permanent audit trail.
+**Why:** failed UPI transfers must be auto-reversed by T+1 (next working day), else the bank pays the user ₹100/day (RBI rule). Reconciliation creates these entries too.

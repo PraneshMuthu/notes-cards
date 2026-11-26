@@ -29,7 +29,7 @@ Keep keys ordered from most to least recently used. A get moves the entry to the
 **Example:** a desk holding 5 books: the one you read goes on top, and the bottom book returns to the shelf.
 
 ## Strict LRU or approximate LRU at 1 billion keys? {#hld09-approx-lru}
-Strict LRU is the expected answer. Its two pointers cost ~16 B per entry, ~16 GB across the cluster. Redis uses approximate LRU: sample ~5 keys and evict the oldest.
+Strict LRU is fine here: its two pointers cost ~16 B per entry, ~16 GB across a 1 TB cluster, under 2%. Redis uses approximate LRU instead: sample ~5 keys and evict the oldest, which saves memory and is close enough.
 **Trap:** Redis's default `maxmemory-policy` is `noeviction` (rejects writes when full). A cache must set `allkeys-lru`.
 
 ## How does a key expire (TTL) without scanning everything? {#hld09-ttl}
@@ -41,18 +41,18 @@ Resizing moves almost every key. Going 24 → 25 nodes, a key stays only if `has
 **Why:** ~960M of 1B keys miss at once and DB reads head toward 900K/s.
 **Example:** consistent hashing moves only ~1/25 = 4%, about 36K extra DB reads/s briefly.
 
-## How does consistent hashing work, and why virtual nodes? {#hld09-consistent-hashing}
-Hash nodes and keys onto a ring (0 to 2³²−1); a key belongs to the first node clockwise. Virtual nodes put each machine on the ring ~150 times (`"A#1"`, `"A#2"`...).
-**Why:** with one point per node, gaps are uneven (one node may own 2-3× average). 150 points gives a std dev of ~5-10%. When a node dies, its small arcs spread to all survivors (~1/23 each), not one neighbour.
-**Example:** a 2× RAM machine gets 300 vnodes. Ring = 24 × 150 = 3,600 points, binary search ~12 steps.
+## How does consistent hashing work? {#hld09-consistent-hashing}
+Hash nodes and keys onto a ring (0 to 2³²−1); a key belongs to the first node clockwise. Adding node 25 takes over only the keys between it and its predecessor.
+**Why:** only ~1/N of keys move on a resize, instead of ~all with `hash % N`.
+**Example:** a clock face: each node sits at a time, each key walks clockwise to the next node.
 
 ## Who holds the ring: the client library or a proxy? {#hld09-routing}
-Smart client library (the pick): it holds the ring, gets updates from ZooKeeper/etcd and talks straight to the node, one hop. A proxy (twemproxy, Envoy) keeps clients simple but adds ~0.2-0.5 ms and a fleet to run.
+Smart client library (the pick): it holds the ring, gets updates from a config store (ZooKeeper or etcd) and talks straight to the node, one hop. A proxy (twemproxy, Envoy: a middle server that routes for you) keeps clients simple but adds ~0.2-0.5 ms and a fleet to run.
 **Why:** the latency budget is ~2 ms. The cost of client-side routing is one client library per language.
 **Example:** Redis Cluster uses 16,384 fixed hash slots (`CRC16(key) % 16384`) assigned to nodes, the same idea.
 
 ## A primary dies. Walk through failover. {#hld09-failover}
-Each primary streams writes asynchronously to its replica. Heartbeats (~1 s) detect it; a majority of monitors must agree it is down; the replica is promoted, the config service pushes the new ring entry, and a fresh replica copies the data.
+Each primary streams writes asynchronously to its replica. Heartbeats (~1 s) detect it; a majority of monitors (watcher processes) must agree it is down; the replica is promoted, the config service pushes the new ring entry, and a fresh replica copies the data.
 **Why:** the majority vote stops one flaky network link from causing a false failover. Async means the primary replies without waiting for the replica.
 **Example:** the loss is under a second of acknowledged writes, which just miss or are briefly stale until TTL.
 
@@ -81,3 +81,12 @@ Cache-aside: the app reads the cache, on a miss reads the DB and fills the cache
 ## Give the 30-second pitch for the distributed cache. {#hld09-pitch}
 A cache in front of a DB: 1 TB and 1M ops/s means 24 primaries plus 24 async replicas. Each node is a hash map plus LRU list, O(1) everything, TTL lazy plus sampled.
 **Why:** clients route with a consistent-hash ring (150 vnodes), so a resize moves ~4%, not 96%. Failover by majority vote and replica promotion. Cache-aside with delete-on-write. Hot keys: local cache or key suffixes. Stampedes: a lock and jittered TTLs.
+
+## Why does each node need virtual nodes? {#hld09-vnodes}
+A virtual node (vnode) is one of many ring positions a physical machine owns (`"A#1"`, `"A#2"`, ... ~150 each; 24 × 150 = 3,600 points).
+**Why:** with one point per node the arcs are uneven (one node may own 2-3× average); 150 points gives a load std dev of ~5-10%. When a node dies its small arcs spread to all survivors (~1/23 each), not one neighbour.
+**Example:** a machine with 2× the RAM gets 300 vnodes.
+
+## What hit ratio does the design assume, and what happens on a cold node? {#hld09-hit-ratio}
+95% hits, so the DB sees 5% of 900K gets/s = 45K reads/s. Hit ratio is what protects the DB.
+**Why:** a replaced node starts empty and every key it owns misses until refilled via cache-aside. Refilling ~42 GB of cold data takes minutes, which is why a replica (already warm) is promoted instead.
