@@ -245,3 +245,18 @@ test('endless weak list skips learning/relearning cards whose step is not due ye
   // Nothing else at all: the early step is offered rather than an empty screen.
   assert.equal(pick({ cards: [cards[0]], states: st, reviews: entries, settings: { newPerDay: 1 } }).card.id, 'l');
 });
+
+test('skipped card whose step is due is not shown again for 10 minutes', () => {
+  const cards = [card('r', 'G', 'A'), card('o', 'H', 'B')];
+  const entries = [...graduated('r', 30), { c: 'r', g: 1, t: ago(30 * MIN), d: '' }, ...graduated('o', 30)];
+  const st = states(cards, entries);
+  // 'r' is a relearning card whose step is due, normally exempt from the no-repeat window.
+  assert.equal(pick({ cards, states: st, reviews: entries }).card.id, 'r');
+  const history = [{ id: 'r', at: ago(1 * MIN), skip: true }];
+  assert.equal(pick({ cards, states: st, reviews: entries, history }).card.id, 'o');
+  // After 10 minutes the skip expires.
+  const old = [{ id: 'r', at: ago(12 * MIN), skip: true }, { id: 'o', at: ago(11 * MIN) }];
+  assert.equal(pick({ cards, states: st, reviews: entries, history: old }).card.id, 'r');
+  // Alone, it still comes back rather than an empty screen.
+  assert.equal(pick({ cards: [cards[0]], states: st, reviews: entries, history }).card.id, 'r');
+});

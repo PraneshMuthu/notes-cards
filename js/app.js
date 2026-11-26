@@ -122,6 +122,17 @@ function grade(g) {
   showNext();
 }
 
+// Move on without grading: nothing is logged, so the card's schedule and the daily new-card
+// count are untouched; the picker keeps it away for ~10 minutes.
+function skip() {
+  if (!pick || performance.now() - gradedAt < TAP_GUARD) return;
+  gradedAt = performance.now();
+  history.push({ id: pick.card.id, at: Date.now(), skip: true });
+  session.lastGroup = pick.card.group;
+  document.activeElement?.blur();
+  showNext();
+}
+
 function saveUi() { safe(() => localStorage.setItem(UI_KEY, JSON.stringify(ui))); }
 function loadUi() {
   const s = safe(() => JSON.parse(localStorage.getItem(UI_KEY)), null);
@@ -258,7 +269,9 @@ document.addEventListener('keydown', (e) => {
   if (e.target.closest?.('button, input, select, label, summary, a')) return;
   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
   else if ('1234'.includes(e.key)) grade(Number(e.key));
+  else if (e.key === 's' || e.key === 'ArrowRight') skip();
 });
+$('skipBtn').onclick = skip;
 $('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a')) reveal(); });
 for (const b of document.querySelectorAll('#grades button')) b.onclick = () => grade(Number(b.dataset.g));
 

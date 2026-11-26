@@ -67,7 +67,7 @@ function rotateTopics(fresh, cards, reviews) {
   return fresh.map((x) => ({ x, r: rank(x.card) })).sort((a, b) => a.r - b.r).map((e) => e.x);
 }
 
-function buildTiers(pool, ctx, skip) {
+function buildTiers(pool, ctx, skip, holdStep = () => false) {
   const { states, now, fsrs, filter, session, newCount, shown, cards, reviews } = ctx;
   const byAge = (a, b) => (shown.get(a.id) ?? 0) - (shown.get(b.id) ?? 0);
   const q = new Map(pool.map((c) => [c.id, queueOf(states.get(c.id), now)]));
@@ -77,7 +77,7 @@ function buildTiers(pool, ctx, skip) {
     pool.filter((c) => !states.has(c.id)).filter((c) => !skip(c)).map(cand('new')), cards, reviews);
   const stepDue = studied.filter((c) => {
     const k = q.get(c.id);
-    return (k === 'learning' || k === 'relearning') && states.get(c.id).due <= now;
+    return (k === 'learning' || k === 'relearning') && states.get(c.id).due <= now && !holdStep(c);
   });
   const t1 = stepDue.sort((a, b) => states.get(a.id).due - states.get(b.id).due)
     .map((c) => ({ card: c, queue: q.get(c.id) }));
@@ -128,11 +128,17 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
   const counted = history.slice(history.length - window).map((h) => h.id);
   const timed = history.filter((h) => now.getTime() - h.at < TEN_MIN).map((h) => h.id);
 
+  // Cards the user skipped in the last 10 minutes; unlike graded ones, they lose the
+  // step-due exemption so a skipped "forgot" card doesn't bounce straight back.
+  const skipped = new Set(history.filter((h) => h.skip && now.getTime() - h.at < TEN_MIN).map((h) => h.id));
+
   // Stepwise relaxation: full exclusion, count window only, last shown only, nothing.
-  // (T1 cards whose step is due are exempt inside buildTiers.)
+  // (T1 cards whose step is due are exempt inside buildTiers, unless recently skipped.)
   let tiers = [];
-  for (const ex of [new Set([...counted, ...timed]), new Set(counted), new Set([last]), new Set()]) {
-    tiers = buildTiers(pool, ctx, (c) => ex.has(c.id));
+  const levels = [[new Set([...counted, ...timed]), skipped], [new Set(counted), skipped],
+    [new Set([last]), new Set()], [new Set(), new Set()]];
+  for (const [ex, hold] of levels) {
+    tiers = buildTiers(pool, ctx, (c) => ex.has(c.id), (c) => hold.has(c.id));
     if (tiers.some((t) => t.length)) break;
   }
   tiers = tiers.filter((t) => t.length);
