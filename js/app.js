@@ -264,7 +264,10 @@ for (const b of document.querySelectorAll('#grades button')) b.onclick = () => g
 
 function installHint() {
   const standalone = safe(() => matchMedia('(display-mode: standalone)').matches, false) || navigator.standalone;
-  if (standalone || ui.installHintDismissed) return;
+  // Only iOS evicts storage of non-installed sites; laptops don't need this hint.
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!ios || standalone || ui.installHintDismissed) return;
   banner('installHint', "Add to Home Screen so iOS keeps your progress. If you've studied here already, " +
     'Export first, then Import in the installed app.', () => { ui.installHintDismissed = true; saveUi(); });
 }
