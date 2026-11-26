@@ -198,7 +198,8 @@ function wireMenu() {
     const file = safe(() => new File([json], name, { type: 'application/json' }));
     // iOS standalone ignores <a download>; the share sheet can "Save to Files".
     let shared = false;
-    if (file && safe(() => navigator.canShare?.({ files: [file] }), false)) {
+    const touch = safe(() => matchMedia('(pointer: coarse)').matches, false); // laptop: plain download
+    if (file && touch && safe(() => navigator.canShare?.({ files: [file] }), false)) {
       try { await navigator.share({ files: [file] }); shared = true; }
       catch (err) { if (err?.name === 'AbortError') { msg('Export cancelled.'); return; } } // else: download below
     }
