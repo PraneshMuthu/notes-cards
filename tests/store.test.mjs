@@ -87,3 +87,59 @@ test('import is idempotent', () => {
   assert.equal(b.importJson(json).added, 0);
   assert.equal(b.reviews().length, 2);
 });
+
+const seeded = (log) => { const st = fakeStorage(); st.setItem('nc:v1:log', log); return st; };
+const backupKeys = (st) => [...st._m.keys()].filter((k) => k.startsWith('nc:v1:log:corrupt-'));
+const spyStorage = (initial = {}) => {
+  const m = new Map(Object.entries(initial));
+  return { _m: m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) };
+};
+
+test('corrupt log is backed up before being replaced', () => {
+  const st = spyStorage({ 'nc:v1:log': '{bad' });
+  const s = createStore(st);
+  assert.equal(s.recovered, true);
+  assert.equal(s.ok, true);
+  s.add(rv('a', 3, T0));
+  const keys = backupKeys(st);
+  assert.equal(keys.length, 1);
+  assert.equal(st._m.get(keys[0]), '{bad');
+  assert.equal(s.reviews().length, 1);
+});
+
+test('mixed valid/invalid entries: keep valid, back up raw, replay does not throw', () => {
+  const raw = JSON.stringify([rv('a', 3, T0), null, { g: 3 }, rv('b', 9, T0)]);
+  const st = spyStorage({ 'nc:v1:log': raw });
+  const s = createStore(st);
+  assert.equal(s.recovered, true);
+  assert.equal(s.reviews().length, 1);
+  assert.equal(st._m.get(backupKeys(st)[0]), raw);
+  assert.doesNotThrow(() => replay(s.reviews(), makeFsrs({ fuzz: false }), ids));
+});
+
+test('getItem throws but setItem works: never writes the LOG key', () => {
+  const writes = [];
+  const st = { getItem() { throw new Error('x'); }, setItem: (k, v) => writes.push(k) };
+  const s = createStore(st);
+  assert.equal(s.ok, false);
+  s.add(rv('a', 3, T0));
+  assert.equal(s.reviews().length, 1);
+  assert.ok(!writes.includes('nc:v1:log'));
+});
+
+test('backup write failure blocks LOG writes', () => {
+  const writes = [];
+  const st = { getItem: (k) => (k === 'nc:v1:log' ? '{bad' : null), setItem(k) { if (k.includes('corrupt')) throw new Error('q'); writes.push(k); } };
+  const s = createStore(st);
+  assert.equal(s.ok, false);
+  s.add(rv('a', 3, T0));
+  assert.ok(!writes.includes('nc:v1:log'));
+});
+
+test('settings stored as string or array fall back to defaults; add validates', () => {
+  for (const v of ['"hi"', '[1,2]']) {
+    const st = spyStorage({ 'nc:v1:settings': v });
+    assert.deepEqual(createStore(st).settings(), { newPerDay: 10 });
+  }
+  assert.throws(() => createStore(null).add({ c: 'a' }), /Invalid review/);
+});

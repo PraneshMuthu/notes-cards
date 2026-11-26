@@ -24,21 +24,48 @@ export function createStore(storage) {
     try { return JSON.parse(text) ?? fallback; } catch { return fallback; }
   };
 
-  let log = parse(read(LOG), []);
-  if (!Array.isArray(log)) log = [];
+  let blockLog = false; // never write LOG when true
+  let recovered = false;
+  let log = [];
+  let raw = null;
+  if (storage) {
+    try { raw = storage.getItem(LOG); } catch { ok = false; blockLog = true; }
+  }
+  if (raw != null) {
+    let parsed;
+    let bad = false;
+    try { parsed = JSON.parse(raw); } catch { bad = true; }
+    if (!bad && !Array.isArray(parsed)) bad = true;
+    if (!bad) {
+      log = parsed.filter(validReview);
+      if (log.length !== parsed.length) bad = true;
+    }
+    if (bad) {
+      try { storage.setItem(`${LOG}:corrupt-${Date.now()}`, raw); recovered = true; }
+      catch { ok = false; blockLog = true; }
+    }
+  }
   let deviceId = read(DEVICE);
   if (!deviceId) { deviceId = crypto.randomUUID(); write(DEVICE, deviceId); }
-  let cfg = { ...DEFAULT_SETTINGS, ...(parse(read(SETTINGS), {}) || {}) };
+  const stored = parse(read(SETTINGS), {});
+  const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
+  let cfg = { ...DEFAULT_SETTINGS, ...(isObj(stored) ? stored : {}) };
 
-  const persist = () => write(LOG, JSON.stringify(log));
+  const persist = () => { if (!blockLog) write(LOG, JSON.stringify(log)); };
 
   return {
     get ok() { return ok; },
     deviceId,
+    get recovered() { return recovered; },
     reviews: () => log.slice(),
-    add(review) { log.push(review); persist(); },
+    add(review) {
+      if (!validReview(review)) throw new Error('Invalid review');
+      const e = { c: review.c, g: review.g, t: review.t, d: review.d };
+      if (review.x) e.x = true;
+      log.push(e); persist();
+    },
     settings: () => ({ ...cfg }),
-    saveSettings(s) { cfg = { ...DEFAULT_SETTINGS, ...s }; write(SETTINGS, JSON.stringify(cfg)); },
+    saveSettings(s) { cfg = { ...DEFAULT_SETTINGS, ...(isObj(s) ? s : {}) }; write(SETTINGS, JSON.stringify(cfg)); },
     exportJson: () => JSON.stringify({ app: 'notes-cards', version: 1, reviews: log }),
     importJson(text) {
       let data;
