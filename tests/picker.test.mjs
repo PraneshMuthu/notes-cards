@@ -122,10 +122,10 @@ test('no repeat within window', () => {
   const cards = [card('a', 'G', 'A'), card('b', 'G', 'B'), card('c', 'G', 'C'), card('d', 'G', 'D')];
   const entries = [...graduated('a', 40), ...graduated('b', 30), ...graduated('c', 20), ...graduated('d', 10)];
   const history = [{ id: 'b', at: ago(50 * MIN) }, { id: 'a', at: ago(40 * MIN) }];
-  // window = min(20, floor(4/2)) = 2 -> a and b excluded though a is oldest due
+  // a and b were shown this round -> excluded though a is oldest due
   const r = pick({ cards, states: states(cards, entries), reviews: entries, history });
   assert.equal(r.card.id, 'c');
-  // 10-minute rule: a shown 5 min ago, outside the count window but inside 10 min
+  // a shown this round -> b next
   const h2 = [{ id: 'a', at: ago(5 * MIN) }, { id: 'x1', at: ago(4 * MIN) }, { id: 'x2', at: ago(3 * MIN) }];
   assert.equal(pick({ cards, states: states(cards, entries), reviews: entries, history: h2 }).card.id, 'b');
   // exclusion ignored when it would empty everything
@@ -133,12 +133,41 @@ test('no repeat within window', () => {
   assert.equal(pick({ cards: one, history: [{ id: 'a', at: ago(MIN) }] }).card.id, 'a');
 });
 
-test('learning card whose step is due is exempt from no-repeat', () => {
+test('learning card whose step is due still waits for the round', () => {
   const cards = [card('l', 'G', 'A'), card('d', 'G', 'A')];
   const entries = [{ c: 'l', g: 3, t: ago(30 * MIN), d: '' }, ...graduated('d', 20)];
   const st = states(cards, entries);
   const r = pick({ cards, states: st, reviews: entries, history: [{ id: 'l', at: ago(MIN) }] });
-  assert.equal(r.card.id, 'l');
+  assert.equal(r.card.id, 'd');
+  assert.equal(r.newRound, false);
+});
+
+test('round: every card once before any repeats, then a new round', () => {
+  const cards = Array.from({ length: 12 }, (_, i) => card(`c${i}`, i % 2 ? 'A' : 'B', `t${i}`));
+  const reviews = [], history = [], order = [];
+  let roundStart = now.getTime();
+  for (let i = 0; i < 24; i++) {
+    const t = new Date(now.getTime() + i * MIN);
+    const r = pickNext({ cards, states: replay(reviews, f, new Set(cards.map((c) => c.id))), reviews, history,
+      now: t, fsrs: f, filter: filterAll, settings: { newPerDay: 3 }, session: { endlessCount: i }, roundStart });
+    if (r.newRound) roundStart = t.getTime();
+    assert.equal(r.newRound, i === 12, `newRound at ${i}`);
+    order.push(r.card.id);
+    history.push({ id: r.card.id, at: t.getTime() });
+    reviews.push({ c: r.card.id, g: i % 3 ? 3 : 1, t: t.getTime(), d: '' });
+  }
+  assert.equal(new Set(order.slice(0, 12)).size, 12);
+  assert.equal(new Set(order.slice(12)).size, 12);
+});
+
+test('round: a card due a real interval after it was shown comes back mid-round', () => {
+  const cards = [card('a', 'G', 'A'), card('b', 'G', 'B'), card('c', 'G', 'C')];
+  const entries = [...graduated('a', 40), ...graduated('b', 30), ...graduated('c', 20)];
+  const st = states(cards, entries);
+  // All three shown in this round (reviews are in it), but each is due again days later.
+  const r = pick({ cards, states: st, reviews: entries, roundStart: ago(50 * DAY) });
+  assert.equal(r.newRound, false);
+  assert.equal(r.queue, 'due');
 });
 
 test('forgot filter shows relearning cards before their step', () => {
@@ -191,9 +220,9 @@ test('small deck rotates: no back-to-back repeats, all cards seen', () => {
 });
 
 test('endless: new cards only on every 5th pick, never bypass cap', () => {
-  const cards = Array.from({ length: 6 }, (_, i) => card(`c${i}`, 'G', `t${i}`));
-  // Two capped new cards were first-reviewed today (graduated far into the future via Easy).
-  const reviews = ['c0', 'c1'].flatMap((id, i) => [
+  const cards = Array.from({ length: 8 }, (_, i) => card(`c${i}`, 'G', `t${i}`));
+  // Six cards were first-reviewed today (graduated far into the future via Easy), using up the cap.
+  const reviews = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'].flatMap((id, i) => [
     { c: id, g: 4, t: new Date(2026, 2, 10, 9, i).getTime(), d: '' },
     { c: id, g: 4, t: new Date(2026, 2, 10, 9, i, 30).getTime() + 10 * MIN, d: '' },
   ]);
@@ -246,7 +275,7 @@ test('endless weak list skips learning/relearning cards whose step is not due ye
   assert.equal(pick({ cards: [cards[0]], states: st, reviews: entries, settings: { newPerDay: 1 } }).card.id, 'l');
 });
 
-test('skipped card whose step is due is not shown again for 10 minutes', () => {
+test('a skipped card waits for the round like any other', () => {
   const cards = [card('r', 'G', 'A'), card('o', 'H', 'B')];
   const entries = [...graduated('r', 30), { c: 'r', g: 1, t: ago(30 * MIN), d: '' }, ...graduated('o', 30)];
   const st = states(cards, entries);
@@ -254,7 +283,7 @@ test('skipped card whose step is due is not shown again for 10 minutes', () => {
   assert.equal(pick({ cards, states: st, reviews: entries }).card.id, 'r');
   const history = [{ id: 'r', at: ago(1 * MIN), skip: true }];
   assert.equal(pick({ cards, states: st, reviews: entries, history }).card.id, 'o');
-  // After 10 minutes the skip expires.
+  // Once everything has had its turn, a new round can bring it back.
   const old = [{ id: 'r', at: ago(12 * MIN), skip: true }, { id: 'o', at: ago(11 * MIN) }];
   assert.equal(pick({ cards, states: st, reviews: entries, history: old }).card.id, 'r');
   // Alone, it still comes back rather than an empty screen.

@@ -13,7 +13,7 @@ const safe = (fn, fallback = null) => { try { return fn(); } catch { return fall
 
 let cards = [];
 let store, states;
-// ui also holds: installHintDismissed, lastExportAt, reviewsAtExport, lastGroup.
+// ui also holds: installHintDismissed, lastExportAt, reviewsAtExport, lastGroup, roundStart.
 let ui = { queue: 'all', offGroups: [], offTopics: [] };
 const history = [];
 const session = { endlessCount: 0 };
@@ -91,8 +91,10 @@ function updateNav() {
 function showNext() {
   pick = pickNext({
     cards, states, reviews: reviews(), history, now: new Date(), fsrs,
-    filter: filter(), settings: store.settings(), session,
+    filter: filter(), settings: store.settings(), session, roundStart: ui.roundStart,
   });
+  // Every card in the selection has had its turn: start the next round from here.
+  if (pick?.newRound || !ui.roundStart) { ui.roundStart = Date.now(); saveUi(); }
   pickedAt = Date.now();
   renderLive();
 }

@@ -1,7 +1,7 @@
 import { dayKey } from './day.js';
 import { queueOf, retrievability } from './scheduler.js';
 
-const TEN_MIN = 10 * 60 * 1000;
+const HALF_DAY = 12 * 60 * 60 * 1000;
 
 /** Cap minus distinct cards whose first review is today (4 AM cutoff) and not endless (`x`). */
 export function newLeftToday(reviews, cards, now, newPerDay) {
@@ -161,40 +161,47 @@ function buildTiers(pool, ctx, skip, holdStep = () => false) {
   // early steps, soonest first, rather than a repeat or an empty screen.
   const early = studied.filter((c) => stepPending(c) && !skip(c))
     .sort((a, b) => states.get(a.id).due - states.get(b.id).due).map(cand('weak'));
+  // Old cards first; once every old card has had its turn this round, the unseen ones.
   const t4 = session.endlessCount % 5 === 4 && endlessNew.length ? endlessNew
-    : settled.length ? (weak.length ? weak : early)
-    : pool.some((c) => !states.has(c.id)) ? endlessNew : early;
+    : weak.length ? weak : endlessNew.length ? endlessNew : early;
   return [t1, t2, t3, t4];
 }
 
-/** Choose the next card to show, or null if the filter matches nothing. */
-export function pickNext({ cards, states, reviews, history, now, fsrs, filter, settings, session }) {
+/**
+ * Choose the next card to show, or null if the filter matches nothing.
+ * Cards go round like a deck: a card shown this round (since `roundStart`) is not shown again
+ * until every other card in the pool has had its turn. Exception: a card that has become due a
+ * real interval (12 h+) after it was shown, so spaced reviews are never held back by a long round.
+ * When the round is used up the result has `newRound: true`; the caller starts a new round.
+ */
+export function pickNext({ cards, states, reviews, history, now, fsrs, filter, settings, session, roundStart }) {
   const pool = cards.filter((c) =>
     (!filter.groups || filter.groups.has(c.group)) && (!filter.topics || filter.topics.has(c.topic)));
   if (!pool.length) return null;
 
   const newCount = newLeftToday(reviews, cards, now, settings.newPerDay);
-  const window = Math.min(20, Math.floor(pool.length / 2));
   const shown = new Map();
   for (const r of reviews) shown.set(r.c, Math.max(shown.get(r.c) ?? 0, r.t));
   for (const h of history) shown.set(h.id, Math.max(shown.get(h.id) ?? 0, h.at));
   const ctx = { states, now, fsrs, filter, session, newCount, shown, cards, reviews };
   const last = history.length ? history[history.length - 1].id : null;
-  const counted = history.slice(history.length - window).map((h) => h.id);
-  const timed = history.filter((h) => now.getTime() - h.at < TEN_MIN).map((h) => h.id);
 
-  // Cards the user skipped in the last 10 minutes; unlike graded ones, they lose the
-  // step-due exemption so a skipped "forgot" card doesn't bounce straight back.
-  const skipped = new Set(history.filter((h) => h.skip && now.getTime() - h.at < TEN_MIN).map((h) => h.id));
+  const start = roundStart ?? (history.length ? Math.min(...history.map((h) => h.at)) : now.getTime());
+  const inRound = new Set();
+  for (const [id, t] of shown) {
+    if (t < start) continue;
+    const st = states.get(id);
+    if (st && st.due.getTime() <= now.getTime() && st.due.getTime() - t >= HALF_DAY) continue;
+    inRound.add(id);
+  }
 
-  // Stepwise relaxation: full exclusion, count window only, last shown only, nothing.
-  // (T1 cards whose step is due are exempt inside buildTiers, unless recently skipped.)
-  let tiers = [];
-  const levels = [[new Set([...counted, ...timed]), skipped], [new Set(counted), skipped],
-    [new Set([last]), new Set()], [new Set(), new Set()]];
-  for (const [ex, hold] of levels) {
-    tiers = buildTiers(pool, ctx, (c) => ex.has(c.id), (c) => hold.has(c.id));
-    if (tiers.some((t) => t.length)) break;
+  // This round first; if it is used up, a new round that only avoids repeating the last card.
+  let tiers = [], newRound = false;
+  const levels = [inRound, new Set([last]), new Set()];
+  for (let i = 0; i < levels.length; i++) {
+    const ex = levels[i];
+    tiers = buildTiers(pool, ctx, (c) => ex.has(c.id), (c) => ex.has(c.id));
+    if (tiers.some((t) => t.length)) { newRound = i > 0; break; }
   }
   tiers = tiers.filter((t) => t.length);
   if (!tiers.length) return null;
@@ -204,5 +211,5 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
   let hit = null;
   for (const t of tiers) { hit = pickMixed(t, lastTopic, session.lastGroup); if (hit) break; }
   hit ??= pickMixed(tiers[0], undefined, session.lastGroup);
-  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak' || hit.queue === 'endless-new' };
+  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak' || hit.queue === 'endless-new', newRound };
 }

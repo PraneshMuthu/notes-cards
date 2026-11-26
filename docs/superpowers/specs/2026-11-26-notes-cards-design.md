@@ -255,3 +255,6 @@ Each problem gets about 10–20 cards, covering:
 - **"Forgot"** = relearning, or still learning after the last grade was Forgot. This includes new cards graded Forgot.
 - **Top bar:** plain-word counters (Due / Forgot / New). The topic label moved onto the card. The menu shows "Seen X of Y" overall and per group.
 - **Deploy:** `.nojekyll` at the root, so GitHub Pages serves the raw card `.md` files.
+
+### Rounds (no repeats until every card has had its turn)
+A card shown since `roundStart` (saved in `nc:v1:ui`) is not shown again until every card in the current selection has been shown, learning steps included. The one exception is a card that has become due 12 h or more after it was shown (a real spaced review), so a long round never holds those back. When nothing is left, the picker returns `newRound: true` and the app starts a new round (avoiding an immediate repeat of the last card). Within a round the order is still: step-due, due, new (daily cap), weakest old, then unseen cards.
