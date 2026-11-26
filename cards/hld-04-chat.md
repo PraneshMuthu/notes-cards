@@ -15,29 +15,25 @@ A WebSocket is one long-lived two-way TCP connection, so the server can push a m
 
 ## How many chat servers do we need, and why 100K connections each? {#hld04-conn-math}
 200M concurrent sockets (40% of 500M DAU) ÷ 100K per server = 2,000 chat servers.
-**Why:** memory (100K × ~10 KB ≈ 1 GB) and CPU are not the limit; the real limit is blast radius. A dead box makes all its users reconnect at once (TLS handshake + session write each), and 100K is easy to absorb while 1M is a storm.
+**Why:** memory (100K × ~10 KB ≈ 1 GB) and CPU are not the limit; the real limit is blast radius. A dead box makes all its users reconnect at once, each redoing a TLS handshake (the encrypted-connection setup) and a session write. 100K is easy to absorb, 1M is a storm.
 **Example:** WhatsApp ran ~2M connections per box, so 100K is a cap we choose, not a hardware limit.
 
 ## What is the peak message rate, and how does group fanout change it? {#hld04-rate-math}
 500M × 40 msg/day = 20B/day ÷ 86,400 ≈ 230K/s avg, × 3 peak ≈ 700K msg/s. Deliveries: 90% 1:1 (18B) + 10% group × 19 recipients (38B) = 56B/day ≈ 650K/s avg, ~2M/s peak.
-**Why:** fanout (copying one message to each group member) multiplies work about 20×, which is why groups are capped at 256 and fan out on write.
+**Why:** fanout (copying one message to each group member) means one average group message costs ~20 deliveries; group traffic lifts the total from 20B to 56B/day. That is why groups are capped at 256 and fan out on write.
 
 ## Why Cassandra for messages, and what are the partition key and clustering key? {#hld04-cassandra}
 Partition key `conversation_id` (rows stored together on one node), clustering key `message_id` DESC (sorts rows inside the partition).
-**Why:** 700K writes/s and ~4.4 PB/year of append-only rows, always read as "one chat, newest first". "Last 50 messages" is one read on one node, and you add capacity by adding nodes. Sharded MySQL could work but you build resharding yourself.
+**Why:** 700K writes/s and storage of 20B × 200 B = 4 TB/day × 365 ≈ 1.5 PB × 3 replicas ≈ 4.4 PB/year, always read as "one chat, newest first". "Last 50 messages" is one read on one node, and you add capacity by adding nodes. Sharded MySQL could work but you build resharding yourself.
 **Example:** a filing cabinet with one drawer per chat, papers sorted by date.
 
-## Is one Cassandra partition per conversation too big? {#hld04-partition-size}
-No. A very busy group: 1,000 msg/day × 200 B × 365 ≈ 73 MB/year, which is fine.
-**Why:** groups are capped at 256 members, so write rate has a human limit. For safety margin, bucket by month: partition key `(conversation_id, yyyymm)`.
-
 ## How does a message find the recipient's chat server among 2,000? {#hld04-session-map}
-Each chat server writes `SET session:B chat-server-2 EX 120` to Redis on connect. The sender's server looks it up and forwards over gRPC.
-**Why:** broadcasting to all 2,000 servers means ~4B internal msgs/s with 1,999 of 2,000 wasted; a lookup is ~2M Redis GETs/s at peak. `EX` is a TTL (time-to-live), so a crashed server's keys expire within 120 s.
-**Trap:** the TTL refreshes (200M ÷ 60 s ≈ 3.3M EXPIRE/s) count as Redis ops, so size ~50 shards, not 20.
+Each chat server writes `SET session:B chat-server-2 EX 120` to Redis on connect. The sender's server looks it up and forwards over gRPC (an RPC framework for server-to-server calls).
+**Why:** broadcasting to all 2,000 servers means ~4B internal msgs/s with 1,999 of 2,000 wasted. `EX` is a TTL (time-to-live), so a crashed server's keys expire within 120 s.
+**Trap:** count the TTL refreshes too: 2M GET + 3.3M EXPIRE = 5.3M ops/s ÷ ~100K per node ≈ 50 shards (lookups alone ~20; ~25 if a pipelined node does 200K).
 
 ## What is the inbox table and why write it before delivering? {#hld04-inbox}
-`inbox` has PK `user_id`, CK `message_id`: one row per undelivered message per recipient. It is written before delivery and deleted when the phone ACKs.
+`inbox` has partition key (PK) `user_id` and clustering key (CK) `message_id`: one row per undelivered message per recipient. It is written before delivery and deleted when the phone ACKs.
 **Why:** crash, offline and reconnect all go through the same "drain inbox" path, so a message is never lost. The socket is a fast path; the inbox is the source of truth for "not yet delivered".
 **Example:** a pigeonhole for each person at a hotel desk: the note sits there until they collect it.
 
@@ -67,7 +63,7 @@ Chat servers only hold sockets and pass frames over gRPC. The stateless message 
 - deploys: restarting a chat server drops ~100K sockets (reconnect wave), and business logic changes often
 - scaling: chat servers scale with connections (2,000), the message service with messages (700K/s ÷ ~5K per box ≈ 150-200)
 - Snowflake machine ids fit
-**Example:** the cost is one extra ~1 ms hop. "Same process first, split later" is also a fine answer.
+**Trap:** it costs one extra ~1 ms hop. "Same process first, split later" is also a fine answer.
 
 ## Why an L4 load balancer for chat, not L7? {#hld04-l4-lb}
 L4 works at the TCP level: it picks a server when the connection opens, then passes bytes through without reading them, so each of 200M long-lived sockets costs it very little.
@@ -90,12 +86,8 @@ As two cursors per member per chat in `members_by_conversation`: `last_delivered
 
 ## Why store conversation members in two Cassandra tables? {#hld04-two-tables}
 `members_by_conversation` answers "who is in this chat?" (every send); `conversations_by_user` answers "which chats am I in?" (chat list).
-**Why:** Cassandra only looks up by partition key, so each question needs its own table. Joining a group writes to both. SQL would hit the same issue once ~50B membership rows force sharding.
-**Trap:** do not make `last_message_id` the clustering key to sort the chat list; a clustering key can't be updated in place (delete + insert, more tombstones). Sort the ~200 rows on the phone.
-
-## How is a 1:1 conversation_id created without a lookup or race? {#hld04-dm-id}
-Deterministically: `"dm:" + min(A,B) + ":" + max(A,B)`. Both phones compute the same id.
-**Why:** it must exist before the first message, and a deterministic id avoids creating it twice. Groups get an id from `POST /groups`.
+**Why:** Cassandra only looks up by partition key (PK), so each question needs its own table. Joining a group writes to both. SQL would hit the same issue once ~50B membership rows force sharding.
+**Trap:** do not make `last_message_id` the clustering key (CK, the in-partition sort order) for the chat list; a CK can't be updated in place (delete + insert, more tombstones). Sort the ~200 rows on the phone.
 
 ## How does a 256-member group message get delivered? {#hld04-group-fanout}
 Store the message once in `messages` (partition = group id), then fan out on write: 255 inbox rows, 255 Redis lookups and forwards.
@@ -123,3 +115,14 @@ Phones reconnect via the LB to other servers with jittered backoff. Session keys
 - forgetting chat servers are stateful (needs the session map)
 - writing presence on every heartbeat
 **Why:** each one fails the first follow-up question, e.g. "what if the server crashes right after the ✓?"
+
+## Walk through a send from A to B, both online. {#hld04-send-path}
+1. A's `send` reaches the message service, which assigns a Snowflake `message_id`.
+2. It writes `messages` plus B's `inbox` row.
+3. Only then it ACKs A (✓).
+4. It looks up `session:B` and forwards over gRPC; B's phone ACKs, the inbox row is deleted and A gets ✓✓.
+**Why:** persist first, then ACK, then forward. Inbox, drain and ticks all depend on that order. If `session:B` is missing, B is offline: the inbox row stays and a push goes out.
+
+## Traffic grows 10×. What happens in chat? {#hld04-10x}
+7M msg/s peak. Chat servers, message service and Redis shards scale horizontally, and Cassandra adds nodes.
+**Why:** storage is the real cost, ~44 PB/year, so tier history older than ~90 days to cheaper storage.

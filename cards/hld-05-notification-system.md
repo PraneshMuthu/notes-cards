@@ -36,7 +36,7 @@ Each status answers a real question:
 **Why:** without the log you cannot retry safely, dedup, or debug.
 
 ## Why at-least-once delivery and not at-most-once? {#hld05-at-least-once}
-A worker calls FCM, FCM accepts, the worker crashes before committing its queue offset, so another worker resends. At-most-once (commit first, then send) would lose the OTP on a crash.
+A worker calls FCM, FCM accepts, the worker crashes before committing its Kafka offset (the bookmark of how far a consumer has read), so another worker resends. At-most-once (commit first, then send) would lose the OTP on a crash.
 **Why:** losing an OTP breaks login, while a duplicate is recoverable. So accept at-least-once and add dedup.
 
 ## Where do you dedup notifications? {#hld05-dedup-layers}
@@ -55,17 +55,17 @@ The caller's retry would be wrongly swallowed. Store the key as `PENDING`, set `
 **Why:** a transactional outbox is the heavier alternative, not needed at this depth.
 
 ## How do workers handle provider errors? {#hld05-retries}
-Classify first. Retryable (timeout, 5xx, 429): exponential backoff 1, 2, 4, 8, 16 s plus jitter (random delay so workers don't retry in lockstep), via a retry topic. Permanent (invalid phone, uninstalled app): mark FAILED, delete the dead push token. After 5 retries: dead-letter queue (DLQ).
+Classify first. Retryable (timeout, 5xx, 429): exponential backoff 1, 2, 4, 8, 16 s plus jitter (random delay so workers don't retry in lockstep), via a retry topic (a side queue with a "not before" time, so the main queue keeps flowing). Permanent (invalid phone, uninstalled app): mark FAILED, delete the dead push token. After 5 retries: dead-letter queue (DLQ).
 **Why:** 5 attempts ≈ 31 s keeps an OTP useful; infinite retry clogs queues.
 **Trap:** retrying permanent errors never succeeds.
 
 ## Twilio is down for 20 minutes. What do you do? {#hld05-circuit-breaker}
 A circuit breaker per provider: if error rate > 50% over 30 s it opens and workers stop calling it. SMS routes to a fallback provider (e.g. MSG91); after a cool-off a few test calls check recovery. Email can fail over SES ↔ SendGrid.
 **Why:** retries don't help a 20-minute outage. Push has no fallback (APNs/FCM are the only path), so the app offers "send via SMS instead" for OTP.
-**Example:** don't fail over on one 500: the backup is pricier and slower.
+**Trap:** don't fail over on one 500: the backup is pricier and slower.
 
 ## How long does a 100M-user campaign take, and how do you pace it? {#hld05-campaign}
-Provider quota sets the drain rate. At ~20K sends/s (after a FCM quota raise): 100M ÷ 20,000 = 5,000 s ≈ 83 min. Workers: 20,000 ÷ 500 = 40, autoscaled on queue lag.
+Provider quota sets the drain rate. The default FCM quota is 600K/min = 10K/s, so assume it was raised to 20K/s: 100M ÷ 20,000 = 5,000 s ≈ 83 min. Workers: 20,000 ÷ 500 = 40, autoscaled on queue lag.
 **Why:** a Redis-shared token bucket (counter refilled at 20K/s, each send takes one) keeps you under quota; exceeding it brings 429s and risks SMS sender-ID blocks. The queue absorbs the 100 GB burst.
 **Trap:** FCM HTTP v1 has no batching discount (multicast API shut down June 2024).
 
@@ -74,12 +74,12 @@ Start earlier (5:15) with scheduled delivery, or accept the spread. Never exceed
 **Why:** also apply quiet hours (promo SMS in India limited to 9 am-9 pm by TRAI rules) and check the per-user marketing cap at enqueue time.
 
 ## How many workers and API servers? {#hld05-worker-math}
-One provider call ≈ 100 ms and a worker keeps ~50 in flight: 50 ÷ 0.1 s = 500 sends/s per worker (assumptions). Normal peak 17,000 ÷ 500 ≈ 34, campaign +56, so ~90-100 workers.
+One provider call ≈ 100 ms and a worker keeps ~50 in flight: 50 ÷ 0.1 s = 500 sends/s per worker (assumptions). Normal peak 17,000 ÷ 500 ≈ 34. A campaign adds +56 if unthrottled at 28K/s; throttled to 20K/s it is +40, so ~75-90 total.
 API: ~45K req/s peak ÷ ~2,500 per box ≈ 18, so ~20 servers behind an L7 LB across 3 AZs, minimum 3.
 **Why:** the ceiling is the provider rate limit, not our CPU.
 
 ## The Redis idempotency store goes down. Fail open or closed? {#hld05-redis-down}
-Fail open: send anyway. Worker-side dedup still catches redeliveries, and Redis runs with a replica and Sentinel.
+Fail open: send anyway. Worker-side dedup still catches redeliveries, and Redis runs with a replica plus Sentinel (Redis's auto-failover tool).
 **Why:** a rare duplicate beats a lost OTP.
 
 ## A user opts out while a campaign is in flight. {#hld05-optout}
@@ -97,3 +97,15 @@ SENT means the provider accepted it. DELIVERED comes from provider webhooks (SMS
 - ignoring provider quotas in a campaign (compute the drain time)
 - forgetting opt-out and quiet hours
 **Why:** the bottleneck is the provider's rate limit, not your servers.
+
+## What happens when a Kafka broker dies? {#hld05-kafka-dies}
+Nothing is lost. Every message is stored on 3 brokers: one leader takes writes, two followers copy. With `acks=all` and `min.insync.replicas=2`, a publish counts only once 2 brokers have it.
+**Why:** if the leader dies, a follower holding every message takes over and producers retry against it. SQS does the same across availability zones for you.
+
+## How is the per-user marketing cap enforced? {#hld05-marketing-cap}
+At enqueue: `INCR rl:{user}:{category}:{date}` in Redis; over 3 means skip. The cap is also a count of SENT rows.
+**Why:** checking before the queue means capped users never cost a provider send.
+
+## Traffic grows 10× (1B DAU). What breaks? {#hld05-10x}
+170K notif/s peak and ~340 workers; Kafka and workers scale by adding partitions and workers.
+**Why:** the real limits are provider quotas and SMS cost, so negotiate quotas, shift to push, and use FCM topic messaging for identical broadcasts (one request fans out on Google's side). The log grows to ~2.5 TB/day, so shorten retention or tier to S3.

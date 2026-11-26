@@ -27,7 +27,7 @@ Search the rider's cell plus its 8 neighbours (3×3 block), then filter by exact
 **Example:** 500 m in a dense area can use 6 chars.
 
 ## How does Redis GEO do the nearby search? {#hld07-redis-geo}
-`GEOADD` stores a driver in a sorted set scored by a 52-bit geohash. `GEOSEARCH key FROMLONLAT lng lat BYRADIUS 2 km ASC COUNT 20` does the neighbour-cell scan and distance filter.
+`GEOADD` stores a driver in a sorted set (members ordered by a numeric score) whose score is a 52-bit geohash. `GEOSEARCH key FROMLONLAT lng lat BYRADIUS 2 km ASC COUNT 20` does the neighbour-cell scan and distance filter.
 **Why:** GEOADD is O(log N), and GEOSEARCH only scans the 3×3 block (hundreds of drivers), not the whole city.
 
 ## Geohash or quadtree for moving drivers? {#hld07-quadtree}
@@ -35,20 +35,17 @@ Geohash. Cells are fixed, so an update is "delete old score, insert new score".
 **Why:** a quadtree splits dense areas into smaller squares but is costly to rebalance under 250K moves/s.
 
 ## How many Redis shards for location, and what are the commands per ping? {#hld07-redis-shards}
-2 commands per ping (GEOADD position + ZADD lastseen): 250K × 2 = 500K ops/s ÷ ~50K ops/s per shard ≈ 10 shards (+ replicas).
+2 commands per ping (GEOADD position + ZADD lastseen): 250K × 2 = 500K ops/s ÷ ~50K ops/s per shard (comfortable; tops out near 100K) ≈ 10 shards (+ replicas).
 **Why:** shard key is `city`, so a nearby search hits one shard. Big cities get their own shard; the biggest (~150K drivers → 75K ops/s) is tight, so use adaptive pings or split by 4-char geohash prefix.
 
 ## How do you cut the ping load, and evict drivers whose phone died? {#hld07-adaptive-sweeper}
 Adaptive pings: parked or offline drivers ping every 15-30 s. If 40% are parked: 0.6 × 250K + 0.4 × (1M ÷ 20 s) ≈ 170K/s (−32%).
-**Why:** a GEO member can't have its own TTL, so a `lastseen:{city}` sorted set is swept every ~10 s (`ZRANGEBYSCORE` older than 30 s, then `ZREM` from both). The matcher also skips anyone silent for 30 s.
+**Why:** a GEO member can't have its own TTL, so a `lastseen:{city}` sorted set (driver to last-ping time) is swept every ~10 s (`ZRANGEBYSCORE` older than 30 s, then `ZREM` from both). The matcher also skips anyone silent for 30 s.
 
-## Why Postgres for trips, not Cassandra? {#hld07-postgres-trips}
-Accept needs an atomic conditional update of two rows (driver → ON_TRIP and trip → MATCHED). Postgres does it in one `BEGIN … COMMIT`; trips are only ~1,750 writes/s and ~3.6 TB/year.
-**Why:** Cassandra's conditional writes cover one partition, so a two-row change becomes a hand-built saga with undo code, visible half-done states, and a sweeper for crashes. That, not joins, is the real reason.
-
-## Which database features make a "built-in transaction" better than a saga? {#hld07-transaction-vs-saga}
-Built-in: changes happen together or not at all, others never see half-done state, a crash rolls back automatically. A saga (step 1, step 2, undo) can show a driver ON_TRIP on an unmatched trip, and a crash between steps leaves data stuck until a sweeper repairs it.
-**Why:** use the hand-built version only when scale forces it; at ~1,750 writes/s it doesn't.
+## Why Postgres for trips, not Cassandra, and what goes wrong with a hand-built saga? {#hld07-postgres-trips}
+Accept needs an atomic conditional update of two rows (driver → ON_TRIP, trip → MATCHED). Postgres does it in one `BEGIN … COMMIT`; trips are only ~1,750 writes/s and ~3.6 TB/year.
+**Why:** Cassandra's conditional writes cover one partition, so a two-row change becomes a saga (step 1, step 2, undo code). Other requests can see a half-done state (driver ON_TRIP on an unmatched trip), and a crash between steps leaves data stuck until a sweeper repairs it.
+**Trap:** the real reason is atomicity, not joins; use a saga only when scale forces it.
 
 ## How do you stop one driver being assigned to two rides? {#hld07-double-assign}
 Before offering, `SET lock:driver:D42 trip_A NX EX 15`. NX = only set if absent, so exactly one worker wins; the loser moves to the next driver. 15 s = 10 s accept window + ~5 s slack.
@@ -68,7 +65,7 @@ Sequential offers avoid drivers wasting taps. Worst case 5 drivers × 10 s = 50 
 **Why:** broadcasting works too (the conditional trip update picks the first acceptor) but annoys drivers who get "ride taken".
 
 ## The matching worker dies mid-offer loop. What happens? {#hld07-worker-dies}
-The worker commits its Kafka offset only once the trip reaches MATCHED or NO_DRIVERS. Another worker takes the message, reads the trip from Postgres, and restarts the loop if it is still REQUESTED.
+The worker commits its Kafka offset (the bookmark of how far a consumer has read) only once the trip reaches MATCHED or NO_DRIVERS. Another worker takes the message, reads the trip from Postgres, and restarts the loop if it is still REQUESTED.
 **Why:** the old worker's locks expire within 15 s.
 
 ## A stadium match ends: 5,000 riders, 2,000 drivers in one cell. What breaks? {#hld07-hotspot}
@@ -87,3 +84,15 @@ Promote the replica. Even with total loss the data rebuilds: every driver pings 
 - no way to evict dead drivers (GEO members don't expire)
 - over-building (quadtrees, ML dispatch)
 **Why:** each is the first follow-up an interviewer asks.
+
+## How do ride offers reach the driver's phone? {#hld07-offer-channel}
+Over the WebSocket (a connection that stays open so the server can push) the driver app already holds for pings, with FCM/APNs mobile push as the fallback.
+**Why:** polling for offers from 1M drivers would cost ~250K+ useless requests/s.
+
+## The Postgres primary dies. What happens? {#hld07-pg-failover}
+A synchronous replica (every commit copied before OK) is promoted by Patroni or Aurora in ~30 s. Ride requests queue in Kafka meanwhile.
+**Why:** location ingest is unaffected because it never touches Postgres.
+
+## 10× drivers (10M online). What changes? {#hld07-10x}
+2.5M writes/s. Split per-city keys by geohash-4 region, giving ~50 Redis shards, and use adaptive ping rates.
+**Why:** the Location Service is stateless, so it just scales horizontally.

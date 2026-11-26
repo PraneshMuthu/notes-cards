@@ -34,15 +34,11 @@ The lock lives in one JVM's memory. With 20 app servers each has its own lock ob
 ## Seat holds: Postgres conditional UPDATE or Redis `SET NX EX`? {#hld08-db-vs-redis-hold}
 Chosen: the DB. One source of truth, and confirm is one transaction (seats → BOOKED plus booking → CONFIRMED). The load is only ~360 writes/s.
 **Why:** with Redis the hold lives in Redis but the booking in Postgres; if Redis loses a key mid-payment, someone else can grab a seat about to be confirmed. Redis (`SET seat:{show}:{A1} {holdId} NX EX 600`, Lua for multi-seat) wins only if the DB can't take the write rate.
-**Example:** both are accepted answers; say why you picked yours.
+**Trap:** both are accepted answers; say why you picked yours.
 
 ## Why Postgres and not Cassandra for bookings? {#hld08-postgres}
 Hold needs "mark these 4 seats HELD only if all 4 are free, else none", and confirm needs seats BOOKED plus booking insert together: an ACID transaction (all-or-nothing, isolated from other writers).
 **Why:** Cassandra has no multi-row transactions, and ~360 writes/s (1M bookings/day ÷ 86,400 ≈ 12/s, × 10 peak, × 3 writes) needs no NoSQL write scale. ~0.5 TB/year fits one primary plus replicas.
-
-## Why is the seats primary key `(show_id, seat_id)`? {#hld08-seat-key}
-Every hold touches seats of one show, so the rows it locks sit together.
-**Why:** if you ever shard, `show_id` is the shard key, since a hold never spans two shows. Also `hold_id UNIQUE` on bookings means one hold produces at most one booking, even on a double-click of Pay.
 
 ## Two users want A1+A2 and grab them in opposite order. Deadlock? {#hld08-deadlock}
 Possible if rows lock in different orders. Sorting the `IN (...)` list does not control lock order. Force it with `SELECT … ORDER BY seat_id FOR UPDATE` first, then UPDATE.
@@ -60,7 +56,7 @@ Two protections: extend the hold to now + 15 min once payment starts (outlives t
 ## What is a webhook, and what if it arrives twice or never? {#hld08-webhook}
 A webhook is the gateway calling our URL (`POST /payments/webhook`) when payment finishes; a signature check proves it is from Razorpay.
 **Why:**
-- twice: confirm is idempotent (already CONFIRMED, return 200, do nothing)
+- twice: confirm is idempotent (safe to repeat): already CONFIRMED, return 200, do nothing
 - never: a reconciliation job every minute asks the gateway for the status of PENDING bookings older than ~5 min and confirms or fails them
 
 ## How do you ensure a user is never charged twice for one hold? {#hld08-payment-idempotency}
@@ -88,16 +84,10 @@ Postgres safe budget ~1,000 hold txns/s ÷ ~2 attempts per user = ~500 users/s. 
 Show "very likely sold out" early once admitted count clearly exceeds what remaining seats can serve, and flip to "Sold out" when available seats hit 0.
 **Why:** honest beats hopeful, since ~25K buyers empty the show.
 
-## What else protects a hot on-sale besides the waiting room? {#hld08-hot-layers}
-- CDN serves the static event page
-- gateway rate limits per user and IP (e.g. ≤ 5 hold attempts/min) plus a CAPTCHA before joining the queue
-- a per-account seat cap (e.g. 4 for hot shows, vs ~10 normal) enforced in the hold transaction
-**Why:** blocks bots and scalpers, and a KYC-verified phone per account stops hoarding.
-
 ## The seat-map cache stampedes when a hot key expires. Fix? {#hld08-stampede}
 At 80K reads/s, thousands of requests miss together and all hit Postgres. Let only one request refill (a Redis `SET key:lock NX`, or in-process single-flight); the rest wait ~50 ms or take the slightly old copy.
 **Why:** safe because seat correctness never comes from the cache; the hold UPDATE is the real check.
-**Example:** alternatively push seat changes to admitted users via SSE/WebSocket instead of polling.
+**Also:** push seat changes to admitted users via SSE (Server-Sent Events, one-way server push) or WebSocket instead of polling.
 
 ## The Postgres primary dies mid-sale. What happens? {#hld08-failover}
 A synchronous standby (acks every commit) is promoted by a failover manager (Patroni, or managed RDS/Aurora; Postgres has no built-in auto-failover) in ~30 s. No committed hold is lost.
@@ -111,3 +101,15 @@ A synchronous standby (acks every commit) is promoted by a failover manager (Pat
 - trying to scale the database for a hot on-sale instead of queueing users
 - forgetting that 97% of the concert crowd must lose
 **Why:** the problem is contention on one show's rows, not total capacity.
+
+## What changes at 10× (25M tickets/day)? {#hld08-10x}
+~3,600 writes/s peak, still OK for a large primary, but storage (~5 TB/yr) and lock contention grow. Shard by `show_id` and archive shows older than ~3 months.
+**Why:** a hold never spans two shows, so `show_id` is a clean shard key.
+
+## Why not `SELECT … FOR UPDATE` for holds? {#hld08-for-update}
+That is pessimistic locking: it works, but takes two round trips (select, then update) holding locks in between.
+**Why:** the single conditional UPDATE does check and write in one statement and holds the lock for less time.
+
+## Redis (cache or waiting-room queue) dies. What happens? {#hld08-redis-dies}
+Cache: fall back to Postgres read replicas (slower, still correct). Queue: rebuild from a Redis replica; worst case positions reset.
+**Why:** annoying but never unsafe, because seat correctness lives in Postgres.
