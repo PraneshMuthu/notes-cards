@@ -146,3 +146,27 @@ def daily_temps(t):
 ```
 
 </details>
+
+## LRU Cache: design a fixed-capacity cache with get(key) and put(key, value), both O(1); when full, evict the least recently used key. E.g. cap 2: put 1, put 2, get 1, put 3 evicts key 2. {#dsals-lru-cache}
+**Pattern:** hash map plus recency order (doubly linked list; Python's OrderedDict does both).
+**Insight:** the map finds a key in O(1); the ordered list moves a touched key to the "most recent" end and drops from the "oldest" end in O(1). Both get and put count as a use.
+**Complexity:** O(1) time per operation, O(capacity) space.
+
+<details>
+<summary>Code</summary>
+
+```python
+from collections import OrderedDict
+class LRUCache:
+    def __init__(self, cap): self.cap, self.d = cap, OrderedDict()
+    def get(self, k):
+        if k not in self.d: return -1
+        self.d.move_to_end(k)
+        return self.d[k]
+    def put(self, k, v):
+        self.d[k] = v
+        self.d.move_to_end(k)
+        if len(self.d) > self.cap: self.d.popitem(last=False)
+```
+
+</details>

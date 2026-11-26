@@ -103,7 +103,7 @@ def lcs(a, b):
 ## Word Break: can a string be split into a sequence of words from a dictionary (words reusable)? E.g. "leetcode" with ["leet","code"] gives true. {#dsadp-word-break}
 **Pattern:** 1D DP over prefix length.
 **Insight:** dp[i] is true if some j < i has dp[j] true and `s[j:i]` is a word. dp[0] = true for the empty prefix.
-**Complexity:** O(n^2) substring checks, each up to O(n) to slice and hash, so O(n^3) worst case; O(n) space plus the dictionary.
+**Complexity:** O(n^2) time (O(n^3) counting slice/hash cost), O(n) space.
 
 <details>
 <summary>Code</summary>
@@ -115,6 +115,46 @@ def word_break(s, words):
     for i in range(1, len(s) + 1):
         dp[i] = any(dp[j] and s[j:i] in ws for j in range(i))
     return dp[len(s)]
+```
+
+</details>
+
+## Maximum Subarray: the largest sum of any contiguous, non-empty subarray. E.g. [-2,1,-3,4,-1,2,1,-5,4] gives 6 ([4,-1,2,1]). {#dsadp-max-subarray}
+**Pattern:** Kadane's algorithm (1D DP).
+**Insight:** the best subarray ending here is either the element alone or it extended by the best ending at the previous index. A negative running sum is never worth carrying.
+**Complexity:** O(n) time, O(1) space.
+
+<details>
+<summary>Code</summary>
+
+```python
+def max_subarray(a):
+    cur = best = a[0]
+    for x in a[1:]:
+        cur = max(x, cur + x)
+        best = max(best, cur)
+    return best
+```
+
+</details>
+
+## Longest Palindromic Substring: the longest substring that reads the same both ways. E.g. "babad" gives "bab" (or "aba"). {#dsadp-longest-palindrome}
+**Pattern:** expand around centre.
+**Insight:** every palindrome has a centre: a character (odd length) or a gap between two (even). Expand outward from each of the 2n-1 centres while the ends match.
+**Complexity:** O(n^2) time, O(1) space.
+
+<details>
+<summary>Code</summary>
+
+```python
+def longest_palindrome(s):
+    best = ""
+    for c in range(len(s)):
+        for l, r in ((c, c), (c, c + 1)):
+            while l >= 0 and r < len(s) and s[l] == s[r]:
+                l -= 1; r += 1
+            if r - l - 1 > len(best): best = s[l + 1:r]
+    return best
 ```
 
 </details>

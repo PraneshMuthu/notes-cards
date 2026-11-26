@@ -60,9 +60,9 @@ def level_order(root):
 
 </details>
 
-## Validate Binary Search Tree: is the tree a valid BST (every left-subtree value smaller, every right-subtree value larger, at all depths)? E.g. [5,1,4,null,null,3,6] gives false. {#dsatr-validate-bst}
+## Validate Binary Search Tree: is the tree a valid BST (every left-subtree value smaller, every right-subtree value larger, at all depths)? E.g. [5,4,6,null,null,3,7] gives false (3 is left of 6 but sits in 5's right subtree). {#dsatr-validate-bst}
 **Pattern:** DFS carrying (low, high) bounds.
-**Insight:** comparing only to the parent is wrong (3 sits under 4 but must still exceed 5). Pass down the allowed open interval and tighten it at each child.
+**Insight:** comparing only to the parent is wrong (3 sits under 6 but must still exceed 5). Pass down the allowed open interval and tighten it at each child.
 **Complexity:** O(n) time, O(h) space.
 
 <details>
@@ -114,6 +114,29 @@ def lca(root, p, q):
     if not root or root is p or root is q: return root
     L, R = lca(root.left, p, q), lca(root.right, p, q)
     return root if L and R else (L or R)
+```
+
+</details>
+
+## Binary Tree Right Side View: the values you see looking at the tree from the right, top to bottom. E.g. [1,2,3,null,5,null,4] gives [1,3,4]. {#dsatr-right-side-view}
+**Pattern:** level-order BFS, keep the last node of each level.
+**Insight:** the visible node at each depth is the rightmost one. It can sit in the left subtree when the right side is shorter (e.g. [1,2,3,4] gives [1,3,4]).
+**Complexity:** O(n) time, O(w) space (w = max width).
+
+<details>
+<summary>Code</summary>
+
+```python
+from collections import deque
+def right_side_view(root):
+    res, q = [], deque([root] if root else [])
+    while q:
+        res.append(q[-1].val)
+        for _ in range(len(q)):
+            n = q.popleft()
+            if n.left: q.append(n.left)
+            if n.right: q.append(n.right)
+    return res
 ```
 
 </details>

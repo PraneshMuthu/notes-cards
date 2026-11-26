@@ -47,10 +47,10 @@ def permute(nums):
 
 </details>
 
-## Combination Sum: distinct positive numbers, each reusable any number of times; list all unique combinations summing to a target. E.g. [2,3,6,7], target 7 gives [[2,2,3],[7]]. {#dsabt-combination-sum}
+## Combination Sum: distinct positive numbers, reusable; list all unique combinations summing to a target. E.g. [2,3,6,7], target 7 gives [[2,2,3],[7]]. {#dsabt-combination-sum}
 **Pattern:** backtracking with an index to avoid duplicate orderings.
-**Insight:** at index i either take candidate i again (stay at i, since reuse is allowed) or move to i+1. Never going back to earlier indices stops [2,3] and [3,2] both appearing. Stop when the remainder is 0 or negative.
-**Complexity:** exponential, roughly O(2^(T/m)) time (T = target, m = smallest candidate); O(T/m) recursion depth.
+**Insight:** at index i, take candidate i again (stay at i) or move to i+1. Never going back stops [2,3] and [3,2] both appearing.
+**Complexity:** exponential, O(N^(T/M)) time (N candidates, T target, M smallest candidate); O(T/M) recursion depth.
 
 <details>
 <summary>Code</summary>
@@ -69,9 +69,9 @@ def combination_sum(c, target):
 
 </details>
 
-## Word Search: does a word exist in a grid of letters by moving up, down, left or right, without reusing a cell in one path? E.g. grid [["A","B"],["C","D"]], word "ABDC" gives true. {#dsabt-word-search}
+## Word Search: is a word spelled by adjacent grid cells (4 directions, no cell reused)? E.g. [["A","B"],["C","D"]], "ABDC" gives true. {#dsabt-word-search}
 **Pattern:** grid DFS with backtracking.
-**Insight:** from each cell matching word[0], DFS matching the next letter. Mark the cell visited (e.g. '#') while exploring it, and restore it on the way back so other paths can use it.
+**Insight:** DFS from each cell, matching one letter per step. Mark the cell '#' while exploring and restore it on return (mutates the grid).
 **Complexity:** O(R x C x 3^L) time (L = word length; 3 choices after the first step), O(L) space.
 
 <details>

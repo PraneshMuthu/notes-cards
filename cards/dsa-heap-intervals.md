@@ -107,3 +107,26 @@ def erase_overlap(iv):
 ```
 
 </details>
+
+## Merge k Sorted Lists: merge k sorted linked lists into one sorted list. E.g. [1->4->5, 1->3->4, 2->6] gives 1->1->2->3->4->4->5->6. {#dsahi-merge-k-lists}
+**Pattern:** min-heap of the current head of each list.
+**Insight:** the smallest remaining node is always one of the k heads. Pop it, append it, push its successor. Store `(val, list index, node)` so ties never compare nodes.
+**Complexity:** O(N log k) time (N total nodes), O(k) space.
+
+<details>
+<summary>Code</summary>
+
+```python
+import heapq
+def merge_k(lists):
+    h = [(n.val, i, n) for i, n in enumerate(lists) if n]
+    heapq.heapify(h)
+    dummy = tail = ListNode()
+    while h:
+        _, i, n = heapq.heappop(h)
+        tail.next = n; tail = n
+        if n.next: heapq.heappush(h, (n.next.val, i, n.next))
+    return dummy.next
+```
+
+</details>
