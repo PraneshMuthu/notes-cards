@@ -152,6 +152,7 @@ test('round: every card once before any repeats, then a new round', () => {
       now: t, fsrs: f, filter: filterAll, settings: { newPerDay: 3 }, session: { endlessCount: i }, roundStart });
     if (r.newRound) roundStart = t.getTime();
     assert.equal(r.newRound, i === 12, `newRound at ${i}`);
+    assert.deepEqual(r.round, { pos: (i % 12) + 1, total: 12 }, `position at ${i}`);
     order.push(r.card.id);
     history.push({ id: r.card.id, at: t.getTime() });
     reviews.push({ c: r.card.id, g: i % 3 ? 3 : 1, t: t.getTime(), d: '' });

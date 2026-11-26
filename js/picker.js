@@ -211,5 +211,8 @@ export function pickNext({ cards, states, reviews, history, now, fsrs, filter, s
   let hit = null;
   for (const t of tiers) { hit = pickMixed(t, lastTopic, session.lastGroup); if (hit) break; }
   hit ??= pickMixed(tiers[0], undefined, session.lastGroup);
-  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak' || hit.queue === 'endless-new', newRound };
+  // Position of this card in the round, e.g. 37 of 482 (1 when a new round starts).
+  const pos = newRound ? 1 : pool.filter((c) => inRound.has(c.id)).length + 1;
+  return { card: hit.card, queue: hit.queue, endless: hit.queue === 'weak' || hit.queue === 'endless-new', newRound,
+    round: { pos: Math.min(pos, pool.length), total: pool.length } };
 }

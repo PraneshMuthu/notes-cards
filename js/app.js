@@ -3,7 +3,7 @@ import { parseCardFile } from './parse.js';
 import { renderMarkdown } from './markdown.js';
 import { createStore } from './store.js';
 import { makeFsrs, replay, effective } from './scheduler.js';
-import { pickNext, counts, progress, cardStatus } from './picker.js';
+import { pickNext, counts, progress, cardStatus, newLeftToday } from './picker.js';
 import { createEmptyCard } from '../vendor/ts-fsrs.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -74,9 +74,11 @@ function el(tag, cls, text) {
 }
 
 // Topic, coloured status line and question; `mode` 'live' counts the upcoming view, 'past' views so far.
-function cardEl(card, mode) {
+// `label` overrides the status text (used for "New · 3 of 10 today").
+function cardEl(card, mode, label) {
   const box = el('div', 'card');
   const st = cardStatus(states.get(card.id), reviews().filter((r) => r.c === card.id), new Date(), mode);
+  if (label) st.label = label;
   const front = el('div', 'front');
   front.innerHTML = renderMarkdown(card.front);
   box.append(el('div', 'topic', card.topic), el('div', `status s-${st.kind}`, st.label), front);
@@ -114,12 +116,23 @@ function renderLive() {
       new: 'No new cards left in the topics you have selected.',
     }[ui.queue] ?? 'No cards in the topics you have selected. Turn some on in the menu.'));
   } else {
-    box = cardEl(pick.card, 'live');
+    box = cardEl(pick.card, 'live', newLabel(pick.queue));
     box.append(el('div', 'hint', 'tap to reveal'));
   }
+  $('round').textContent = pick ? `${pick.round.pos} / ${pick.round.total}` : '';
   $('stage').replaceChildren(box);
   updateNav();
   updateCounts();
+}
+
+// Today's new cards are numbered against the daily limit; ones past it are extras.
+function newLabel(queue) {
+  const cap = store.settings().newPerDay;
+  if (queue === 'new' && ui.queue === 'all') {
+    return `New · ${cap - newLeftToday(reviews(), cards, new Date(), cap) + 1} of ${cap} today`;
+  }
+  if (queue === 'endless-new') return "New · extra, beyond today's " + cap;
+  return undefined;
 }
 
 // An earlier card from this session: answer open, read-only, with a small "change grade" row.
@@ -248,6 +261,7 @@ function loadUi() {
   if (s.installHintDismissed === true) ui.installHintDismissed = true;
   if (Number.isFinite(s.lastExportAt)) ui.lastExportAt = s.lastExportAt;
   if (Number.isInteger(s.reviewsAtExport)) ui.reviewsAtExport = s.reviewsAtExport;
+  if (Number.isFinite(s.roundStart)) ui.roundStart = s.roundStart;
   if (typeof s.lastGroup === 'string') session.lastGroup = ui.lastGroup = s.lastGroup;
 }
 
