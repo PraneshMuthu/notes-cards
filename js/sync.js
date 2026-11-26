@@ -36,11 +36,12 @@ export function createSync({ fetch, store, load, save }) {
     return c && typeof c === 'object' ? c : {};
   };
 
+  // path is under /contents/, or null for the repo itself (GET /repos/{owner}/{repo}).
   async function api(c, path, { method = 'GET', body, raw = false, keepalive = false } = {}) {
     const { owner, repo } = parseRepo(c.repo);
     let res;
     try {
-      res = await fetch(`${API}/repos/${owner}/${repo}/contents/${path}`, {
+      res = await fetch(`${API}/repos/${owner}/${repo}${path === null ? '' : `/contents/${path}`}`, {
         method,
         cache: 'no-store', // GitHub sends max-age=60; a stale listing would hide the other device's writes
         keepalive,
@@ -105,9 +106,9 @@ export function createSync({ fetch, store, load, save }) {
       let files = [];
       if (listRes.ok) files = (await listRes.json()).filter((f) => f.type === 'file' && f.name.endsWith('.json'));
       else if (listRes.status === 404) {
-        // No logs/ yet (first sync), or no repo: tell them apart by asking for the repo root.
-        const root = await api(c, '');
-        if (root.status === 404) throw new SyncError('repo', "Repo not found, or the token can't see it.");
+        // No logs/ yet (first sync, or an empty repo with no commits), or no repo: ask for the repo itself.
+        const info = await api(c, null);
+        if (info.status === 404) throw new SyncError('repo', "Repo not found, or the token can't see it (check the token's Repository access).");
       } else throw new SyncError('other', `GitHub error ${listRes.status} while listing.`);
 
       let added = 0;

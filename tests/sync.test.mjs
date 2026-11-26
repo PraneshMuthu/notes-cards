@@ -24,11 +24,12 @@ function fakeGitHub({ owner = 'me', repo = 'progress', token = 'tok' } = {}) {
         json: async () => body, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
       });
       if (opts.headers?.Authorization !== `Bearer ${token}`) return reply(401, {});
-      const m = url.match(/^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/contents\/?(.*)$/);
+      const m = url.match(/^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)(?:\/contents\/(.*))?$/);
       if (!m || m[1] !== owner || m[2] !== repo) return reply(404, {});
       const path = m[3];
+      if (path === undefined) return reply(200, { full_name: `${owner}/${repo}` }); // the repo itself
       if (method === 'GET') {
-        if (path === '') return reply(200, []);
+        if (path === '') return reply(404, { message: 'This repository is empty.' }); // like a repo with no commits
         if (files.has(path)) {
           const f = files.get(path);
           return opts.headers.Accept.includes('raw') ? reply(200, f.text) : reply(200, { path, sha: f.sha });
