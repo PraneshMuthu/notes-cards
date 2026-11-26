@@ -27,7 +27,7 @@ button { cursor: pointer; }
 #banners:empty { display: none; }
 .banner { background: var(--warn-bg); color: var(--warn-fg); padding: 10px 14px; font-size: 15px; display: flex; gap: 10px; align-items: center; }
 .banner button { margin-left: auto; background: none; border: 0; font-size: 18px; color: inherit; }
-#stage { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 14px; -webkit-overflow-scrolling: touch; }
+#stage { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 14px calc(16px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px 18px; min-height: 55%; overflow-wrap: anywhere; animation: up .2s ease-out; }
 @keyframes up { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 .front { font-size: 22px; font-weight: 600; line-height: 1.35; }
@@ -44,7 +44,7 @@ th, td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
 summary { cursor: pointer; color: var(--accent); }
 #grades { display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
 #grades[hidden], #menu[hidden] { display: none; }
-#grades button { flex: 1; min-width: 0; padding: 14px 4px; border-radius: 12px; border: 2px solid; background: var(--card); font-weight: 600; }
+#grades button { touch-action: manipulation; flex: 1; min-width: 0; padding: 14px 4px; border-radius: 12px; border: 2px solid; background: var(--card); font-weight: 600; }
 .g1 { border-color: var(--g1) !important; color: var(--g1); } .g2 { border-color: var(--g2) !important; color: var(--g2); }
 .g3 { border-color: var(--g3) !important; color: var(--g3); } .g4 { border-color: var(--g4) !important; color: var(--g4); }
 #menu { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex; justify-content: flex-end; z-index: 10; }

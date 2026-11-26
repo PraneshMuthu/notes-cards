@@ -13,23 +13,40 @@ const safe = (fn, fallback = null) => { try { return fn(); } catch { return fall
 
 let cards = [];
 let store, states;
+// ui also holds: installHintDismissed, lastExportAt, reviewsAtExport, lastGroup.
 let ui = { queue: 'all', offGroups: [], offTopics: [] };
 const history = [];
 const session = { endlessCount: 0 };
 let pick = null;
 let revealed = false;
+let pickedAt = 0;
+let revealedAt = -Infinity, gradedAt = -Infinity; // double-tap guard (performance.now ms)
+const TAP_GUARD = 350;
+const DAY = 86400000;
+let backupSnoozed = false;
 
-function banner(id, text, dismissible) {
+function banner(id, text, onDismiss) {
   let el = $(id);
   if (!text) { el?.remove(); return; }
   if (!el) { el = document.createElement('div'); el.id = id; el.className = 'banner'; $('banners').append(el); }
   el.textContent = text;
-  if (dismissible) {
+  if (onDismiss) {
     const b = document.createElement('button');
     b.textContent = '✕'; b.setAttribute('aria-label', 'Dismiss');
-    b.onclick = () => el.remove();
+    b.onclick = () => { el.remove(); if (typeof onDismiss === 'function') onDismiss(); };
     el.append(b);
   }
+}
+
+// "N reviews since your last backup": after 7 days or 100 reviews, never before the first review.
+function backupNag() {
+  const reviews = store.reviews();
+  const n = reviews.length - (ui.reviewsAtExport ?? 0);
+  const since = ui.lastExportAt ?? reviews.reduce((m, r) => Math.min(m, r.t), Infinity);
+  const due = n > 0 && (n >= 100 || Date.now() - since >= 7 * DAY);
+  banner('backupNag', due && !backupSnoozed
+    ? `${n} review${n === 1 ? '' : 's'} since your last backup — Export (menu ☰).` : '',
+  () => { backupSnoozed = true; });
 }
 
 function filter() {
@@ -43,6 +60,7 @@ function updateCounts() {
   const c = counts(cards, states, store.reviews(), new Date(), store.settings().newPerDay);
   $('counts').textContent = `⏳ ${c.due} · ✗ ${c.forgot} · ✦ ${c.newLeft}`;
   banner('saveWarn', store.ok ? '' : "Progress isn't being saved on this browser — export a backup.");
+  backupNag();
 }
 
 function showNext() {
@@ -51,6 +69,7 @@ function showNext() {
     filter: filter(), settings: store.settings(), session,
   });
   revealed = false;
+  pickedAt = Date.now();
   $('grades').hidden = true;
   $('stage').scrollTop = 0;
   const el = document.createElement('div');
@@ -76,8 +95,9 @@ function showNext() {
 }
 
 function reveal() {
-  if (!pick || revealed) return;
+  if (!pick || revealed || performance.now() - gradedAt < TAP_GUARD) return;
   revealed = true;
+  revealedAt = performance.now();
   const back = document.createElement('div');
   back.className = 'back';
   back.innerHTML = renderMarkdown(pick.card.back);
@@ -87,14 +107,16 @@ function reveal() {
 }
 
 function grade(g) {
-  if (!pick || !revealed) return;
+  if (!pick || !revealed || performance.now() - revealedAt < TAP_GUARD) return;
   revealed = false; // guards against double taps
+  gradedAt = performance.now();
   const { card, endless } = pick;
   const now = new Date();
   store.add({ c: card.id, g, t: now.getTime(), d: store.deviceId, ...(endless && { x: true }) });
   states.set(card.id, fsrs.next(states.get(card.id) ?? createEmptyCard(now), now, g).card);
   history.push({ id: card.id, at: now.getTime() });
-  session.lastGroup = card.group;
+  session.lastGroup = ui.lastGroup = card.group;
+  saveUi();
   if (endless) session.endlessCount++;
   document.activeElement?.blur();
   showNext();
@@ -107,6 +129,10 @@ function loadUi() {
   if (['all', 'due', 'forgot', 'new'].includes(s.queue)) ui.queue = s.queue;
   if (Array.isArray(s.offGroups)) ui.offGroups = s.offGroups.filter((x) => typeof x === 'string');
   if (Array.isArray(s.offTopics)) ui.offTopics = s.offTopics.filter((x) => typeof x === 'string');
+  if (s.installHintDismissed === true) ui.installHintDismissed = true;
+  if (Number.isFinite(s.lastExportAt)) ui.lastExportAt = s.lastExportAt;
+  if (Number.isInteger(s.reviewsAtExport)) ui.reviewsAtExport = s.reviewsAtExport;
+  if (typeof s.lastGroup === 'string') session.lastGroup = ui.lastGroup = s.lastGroup;
 }
 
 function checkbox(label, checked, cls, onChange) {
@@ -153,7 +179,7 @@ function buildMenu() {
     const v = Math.max(0, Math.min(200, Math.floor(Number(n.value)) || 0));
     n.value = v;
     store.saveSettings({ ...store.settings(), newPerDay: v });
-    updateCounts();
+    if (revealed) updateCounts(); else showNext();
   };
 }
 
@@ -163,15 +189,32 @@ function wireMenu() {
   $('menuClose').onclick = () => open(false);
   $('menu').onclick = (e) => { if (e.target === $('menu')) open(false); };
   const msg = (t) => { $('msg').textContent = t; };
-  $('exportBtn').onclick = () => {
-    const url = URL.createObjectURL(new Blob([store.exportJson()], { type: 'application/json' }));
-    const a = document.createElement('a');
+  $('exportBtn').onclick = async () => {
+    const json = store.exportJson();
+    const count = store.reviews().length;
     const n = new Date();
     const p2 = (x) => String(x).padStart(2, '0');
-    a.href = url; a.download = `notes-cards-progress-${n.getFullYear()}-${p2(n.getMonth() + 1)}-${p2(n.getDate())}.json`;
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const name = `notes-cards-progress-${n.getFullYear()}-${p2(n.getMonth() + 1)}-${p2(n.getDate())}.json`;
+    const file = safe(() => new File([json], name, { type: 'application/json' }));
+    // iOS standalone ignores <a download>; the share sheet can "Save to Files".
+    let shared = false;
+    if (file && safe(() => navigator.canShare?.({ files: [file] }), false)) {
+      try { await navigator.share({ files: [file] }); shared = true; }
+      catch (err) { if (err?.name === 'AbortError') { msg('Export cancelled.'); return; } } // else: download below
+    }
+    if (!shared) {
+      try {
+        const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch { msg('Export failed.'); return; }
+    }
+    ui.lastExportAt = Date.now(); ui.reviewsAtExport = count; saveUi();
+    backupSnoozed = false;
     msg('Exported.');
+    updateCounts();
   };
   $('importBtn').onclick = () => $('importFile').click();
   $('importFile').onchange = async (e) => {
@@ -187,6 +230,7 @@ function wireMenu() {
   };
 }
 
+/** Loads cards; returns how many topic files failed. */
 async function loadDeck() {
   const files = await (await fetch('./cards/index.json')).json();
   const parsed = await Promise.all(files.map(async (f) => {
@@ -197,6 +241,7 @@ async function loadDeck() {
     } catch (err) { console.warn(`Could not load cards/${f}`, err); return null; }
   }));
   const seen = new Set();
+  const failed = parsed.filter((p) => !p).length;
   for (const p of parsed.filter(Boolean)) {
     p.warnings.forEach((w) => console.warn(w));
     for (const c of p.cards) {
@@ -204,6 +249,7 @@ async function loadDeck() {
       seen.add(c.id); cards.push(c);
     }
   }
+  return failed;
 }
 
 document.addEventListener('keydown', (e) => {
@@ -215,18 +261,41 @@ document.addEventListener('keydown', (e) => {
 $('stage').addEventListener('click', (e) => { if (!e.target.closest('summary, a')) reveal(); });
 for (const b of document.querySelectorAll('#grades button')) b.onclick = () => grade(Number(b.dataset.g));
 
+function installHint() {
+  const standalone = safe(() => matchMedia('(display-mode: standalone)').matches, false) || navigator.standalone;
+  if (standalone || ui.installHintDismissed) return;
+  banner('installHint', "Add to Home Screen so iOS keeps your progress. If you've studied here already, " +
+    'Export first, then Import in the installed app.', () => { ui.installHintDismissed = true; saveUi(); });
+}
+
 async function main() {
   store = createStore(safe(() => localStorage));
   if (store.recovered) banner('recovered', 'Your saved progress was damaged; a backup copy was kept in this browser.', true);
+  // Ask the browser not to evict our storage (iOS wipes script-writable storage after ~7 idle days otherwise).
+  try { navigator.storage?.persist?.()?.catch?.(() => {}); } catch { /* optional */ }
   loadUi();
+  installHint();
   wireMenu();
   if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
     try { navigator.serviceWorker.register('./sw.js').catch(() => {}); } catch { /* optional */ }
   }
-  try { await loadDeck(); } catch (err) { console.warn('Could not load cards/index.json', err); }
+  let failed = 0;
+  try { failed = await loadDeck(); } catch (err) { console.warn('Could not load cards/index.json', err); }
   if (!cards.length) { banner('noDeck', 'Could not load any cards. Check your connection and reload.'); return; }
+  if (failed) banner('deckPartial', `${failed} topic file${failed === 1 ? '' : 's'} didn't load.`, true);
   states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
   buildMenu();
   showNext();
+  // Another tab wrote reviews: merge them in so neither tab overwrites the other.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== 'nc:v1:log') return;
+    store.reload();
+    states = replay(store.reviews(), fsrs, new Set(cards.map((c) => c.id)));
+    updateCounts();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (!revealed && Date.now() - pickedAt > 5 * 60000) showNext(); else updateCounts();
+  });
 }
 main();
